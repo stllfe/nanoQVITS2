@@ -1,8 +1,9 @@
-"""Download and preprocess for LJSpeech dataset for q-VITS2 training."""
+"""Download and preprocess LJSpeech dataset for q-VITS2 training."""
 
 import os
 import sys
-from typing import Union
+
+from typing import Iterable, NamedTuple, Union
 
 sys.path.append(os.path.dirname(__file__))
 
@@ -11,11 +12,17 @@ import tyro
 
 from tqdm import tqdm
 
+from utils.text import clean
 from . import consts
 
 
 URL = 'https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2'
 DIR = 'LJSpeech-1.1'
+
+
+class Sample(NamedTuple):
+    filename: str
+    text: str
 
 
 def download_file(url: str, fname: str, chunk_size: int = 1024) -> None:
@@ -35,8 +42,18 @@ def download_file(url: str, fname: str, chunk_size: int = 1024) -> None:
             bar.update(size)
 
 
+def load(filename: str = 'metadata.csv') -> Iterable[Sample]:
+    """Loads dataset samples lazily."""
+
+    filepath = os.path.join(consts.DATA_DIR, DIR, filename)
+    with open(filepath, mode='r', encoding='utf-8') as file:
+        for line in file:
+            name, _, text = line.split('|')
+            yield Sample(name, clean(text.strip()))
+
+
 def download() -> None:
-    """Downloads the LJ Speech dataset to data directory."""
+    """Downloads the LJSpeech dataset to data directory."""
 
     os.makedirs(consts.DATA_DIR, exist_ok=True)
 
@@ -63,7 +80,11 @@ def download() -> None:
 def preprocess() -> None:
     """Prepares all the necessary files for training."""
 
-    pass
+    wavs_dir = os.path.join(consts.DATA_DIR, DIR, 'wavs')
+    for sample in load():
+        path = os.path.join(wavs_dir, f'{sample.filename}.txt')
+        with open(path, mode='w', encoding='utf-8') as file:
+            file.write(sample.text + '\n')
 
 
 if __name__ == '__main__':
