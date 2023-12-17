@@ -1,4 +1,4 @@
-"""q-Features computation utilities."""
+"""Quantized features computation utilities."""
 
 from __future__ import annotations
 
