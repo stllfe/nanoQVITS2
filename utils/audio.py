@@ -18,7 +18,7 @@ def compute_pitch(audio: NDArray, rate: int, freq: float = 0.01) -> tuple[NDArra
     """Computes pitch (F0) values for the given audio.
 
     Returns:
-        A tuple of time frames in seconds and corresponding f0 values.
+        A tuple of time frames in seconds and corresponding F0 values.
     """
 
     outs = pyreaper.reaper(
