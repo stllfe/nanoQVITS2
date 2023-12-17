@@ -34,14 +34,7 @@ class WordFeatures(NamedTuple):
     pitch_rslope: float
 
     def __array__(self) -> NDArray:
-        return np.array([
-            self.volume,
-            self.speed,
-            self.pitch_mean,
-            self.pitch_fslope,
-            self.pitch_lslope,
-            self.pitch_rslope,
-        ])
+        return np.fromiter(self, dtype=float)
 
 
 def isspecial(word: str) -> bool:
