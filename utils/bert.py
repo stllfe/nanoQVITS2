@@ -10,7 +10,9 @@ from transformers import (
     PreTrainedTokenizer
 )
 
-
+# this may be not the best model for the given task
+# check this later:
+# https://github.com/avidale/encodechka
 MODEL = 'cointegrated/rubert-tiny2'
 
 
@@ -19,7 +21,6 @@ def load() -> tuple[PreTrainedModel, PreTrainedTokenizer]:
     model.eval()
     # todo: handle device
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
-    print(f'Loaded {MODEL}')
     return model, tokenizer
 
 
