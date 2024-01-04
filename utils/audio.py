@@ -10,8 +10,9 @@ MIN_F0 = 40
 MAX_F0 = 1100
 
 
-def read(wavpath: str, mmap: bool = False) -> tuple[NDArray, int]:
-    return wavfile.read(wavpath, mmap=mmap)[::-1]
+def readwav(path: str, mmap: bool = False) -> tuple[NDArray, int]:
+    rate, data = wavfile.read(path, mmap=mmap)
+    return data, rate
 
 
 def compute_pitch(audio: NDArray, rate: int, freq: float = 0.01) -> tuple[NDArray, NDArray]:
@@ -21,7 +22,7 @@ def compute_pitch(audio: NDArray, rate: int, freq: float = 0.01) -> tuple[NDArra
         A tuple of time frames in seconds and corresponding F0 values.
     """
 
-    outs = pyreaper.reaper(
+    _, _, times, f0, _ = pyreaper.reaper(
         audio,
         rate,
         minf0=MIN_F0,
@@ -29,7 +30,7 @@ def compute_pitch(audio: NDArray, rate: int, freq: float = 0.01) -> tuple[NDArra
         frame_period=freq,
         unvoiced_cost=0.9
     )
-    return outs[2:4]
+    return times, f0
 
 
 def compute_pitch_slope(f0: NDArray) -> float:

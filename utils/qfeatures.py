@@ -12,7 +12,7 @@ import numpy as np
 from numpy.typing import NDArray
 from textgrid import TextGrid
 
-from utils.audio import compute_pitch, compute_pitch_slope
+from utils.audio import compute_pitch, compute_pitch_slope, readwav
 
 
 @dataclass
@@ -27,7 +27,7 @@ class Word:
 class WordFeatures(NamedTuple):
     volume: float
     speed: float
-
+    pause: float
     pitch_mean: float
     pitch_fslope: float
     pitch_lslope: float
@@ -55,17 +55,25 @@ def compute_word_features(
     assert len(alignment) > 0, 'Empty alignment!'
     times, f0 = compute_pitch(audio, rate)
 
-    for index, interval in enumerate(alignment[0]):
+    markup = alignment[0]
+    prev = 0
+    for index, interval in enumerate(markup):
         t0, t1, word = interval.minTime, interval.maxTime, interval.mark
         dt = t1 - t0
 
         if dt < min_duration or not word:
             continue
 
+        if 0 < index < len(markup) - 1:
+            pause = interval.minTime - markup[prev].maxTime
+        else:
+            pause = 0.
+
         f0w = f0[(times >= t0) & (times <= t1)]
         chunk = audio[int(rate * t0):int(rate * t1)]
-        m = len(f0w) // 2
+        mid = len(f0w) // 2
 
+        prev = index
         yield Word(
             text=word,
             index=index,
@@ -74,10 +82,11 @@ def compute_word_features(
             feats=WordFeatures(
                 volume=np.std(chunk).item(),
                 speed=len(word) / dt if not isspecial(word) else np.nan,
+                pause=pause,
                 pitch_mean=np.mean(f0w).item(),
                 pitch_fslope=compute_pitch_slope(f0w),
-                pitch_lslope=compute_pitch_slope(f0w[:m]),
-                pitch_rslope=compute_pitch_slope(f0w[m:]),
+                pitch_lslope=compute_pitch_slope(f0w[:mid]),
+                pitch_rslope=compute_pitch_slope(f0w[mid:]),
             )
         )
 
@@ -95,9 +104,15 @@ def quantize_features(words: Iterable[Word], bins: int = 5) -> Iterable[Word]:
         _, edges = np.histogram(feats[:, j], bins=bins)
         print(f'Edges: {edges}\n')
         feats[:, j] = np.digitize(feats[:, j], bins=edges, right=False)
-    # shift values by 1 -> [0, bins)
-    feats = feats.astype(np.uint8) - 1
+    feats = feats.astype(np.uint8)
     for i, w in enumerate(words):
         w = copy.deepcopy(w)
         w.feats = WordFeatures(*feats[i])
         yield w
+
+
+# if __name__ == '__main__':
+#     audio, rate = readwav('data/LJSpeech-mini/wavs/LJ001-0001.wav')
+#     alignment = TextGrid.fromFile('data/LJSpeech-mini/alignment/LJ001-0001.TextGrid')
+#     for w in compute_word_features(audio, alignment):
+#         print(w)
