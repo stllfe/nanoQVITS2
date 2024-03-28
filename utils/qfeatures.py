@@ -145,8 +145,7 @@ def gettok(text: str, words: Iterable[Word], offsets: NDArray) -> NDArray:
     chrs = getchr(text, words)
     for offset in offsets:
         s, e = offset
-        tok = text[s:e]
-        print(tok)
-        assert np.equal(chrs[s:e, ...], chrs[s]).all(), "Characters and tokens are not aligned!"
+        if DEBUG > 1: print(text[s:e])
+        assert np.equal(chrs[s:e, ...], chrs[s]).all(), 'Characters and tokens are not aligned!'
         features.append(chrs[s])
     return np.array(features)
