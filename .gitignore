@@ -162,3 +162,5 @@ cython_debug/
 # Project specific
 data/
 notebooks/
+reference/
+tmp/
