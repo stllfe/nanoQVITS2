@@ -12,7 +12,11 @@ import numpy as np
 from numpy.typing import NDArray
 from textgrid import TextGrid
 
-from utils.audio import compute_pitch, compute_pitch_slope, readwav
+from utils.audio import compute_pitch, compute_pitch_slope
+from utils.helpers import DEBUG
+
+
+UNK_FEATURE = 0
 
 
 @dataclass
@@ -27,7 +31,6 @@ class Word:
 class WordFeatures(NamedTuple):
     volume: float
     speed: float
-    pause: float
     pitch_mean: float
     pitch_fslope: float
     pitch_lslope: float
@@ -64,16 +67,10 @@ def compute_word_features(
         if dt < min_duration or not word:
             continue
 
-        if 0 < index < len(markup) - 1:
-            pause = interval.minTime - markup[prev].maxTime
-        else:
-            pause = 0.
-
         f0w = f0[(times >= t0) & (times <= t1)]
         chunk = audio[int(rate * t0):int(rate * t1)]
         mid = len(f0w) // 2
 
-        prev = index
         yield Word(
             text=word,
             index=index,
@@ -82,7 +79,6 @@ def compute_word_features(
             feats=WordFeatures(
                 volume=np.std(chunk).item(),
                 speed=len(word) / dt if not isspecial(word) else np.nan,
-                pause=pause,
                 pitch_mean=np.mean(f0w).item(),
                 pitch_fslope=compute_pitch_slope(f0w),
                 pitch_lslope=compute_pitch_slope(f0w[:mid]),
@@ -96,14 +92,14 @@ def quantize_features(words: Iterable[Word], bins: int = 5) -> Iterable[Word]:
 
     feats = np.array([w.feats for w in words])
     for j in range(feats.shape[1]):
-        print(f'Feature: {j}')
+        if DEBUG: print(f'Feature: {j}')
         # todo: mean imputation maybe not the best idea though
-        mean = np.nanmean(feats[:, j])
-        print(f'Filling NaNs with {mean=:.4f}')
+        mean = np.nanmean(feats[:, j]).item()
+        if DEBUG: print(f'Filling NaNs with {mean=:.4f}')
         np.nan_to_num(feats[:, j], nan=mean, copy=False)
         _, edges = np.histogram(feats[:, j], bins=bins)
-        print(f'Edges: {edges}\n')
-        feats[:, j] = np.digitize(feats[:, j], bins=edges, right=False)
+        if DEBUG: print(f'Edges: {edges}\n')
+        feats[:, j] = np.digitize(feats[:, j], bins=edges, right=True)
     feats = feats.astype(np.uint8)
     for i, w in enumerate(words):
         w = copy.deepcopy(w)
@@ -111,8 +107,46 @@ def quantize_features(words: Iterable[Word], bins: int = 5) -> Iterable[Word]:
         yield w
 
 
-# if __name__ == '__main__':
-#     audio, rate = readwav('data/LJSpeech-mini/wavs/LJ001-0001.wav')
-#     alignment = TextGrid.fromFile('data/LJSpeech-mini/alignment/LJ001-0001.TextGrid')
-#     for w in compute_word_features(audio, alignment):
-#         print(w)
+def getchr(text: str, words: Iterable[Word]) -> NDArray:
+    """Populates word-level q-features per each text character as an NDArray."""
+
+    words = iter(words)
+    word = next(words, None)
+    assert text and word, 'Both sequences should be non-empty!'
+
+    pads = [UNK_FEATURE] * len(word.feats)
+    i = 0
+    features = []
+    while i < len(text):
+        char = text[i]
+        if word and word.text.startswith(char):
+            features.extend([list(word.feats)]*len(word.text))
+            i += len(word.text)
+            word = next(words, None)
+        else:
+            features.append(pads)
+            i += 1
+    return np.array(features)
+
+
+def printchr(text: str, words: Iterable[Word]) -> None:
+    """Prints the word-level features aligned to char text."""
+
+    print(text)
+    for line in getchr(text, words).T:
+        print(''.join(map(str, line)))
+
+
+def gettok(text: str, words: Iterable[Word], offsets: NDArray) -> NDArray:
+    """Populates word-level q-features per each token as an NDArray."""
+
+    assert len(offsets), 'Offsets should be non-empty!'
+    features = []
+    chrs = getchr(text, words)
+    for offset in offsets:
+        s, e = offset
+        tok = text[s:e]
+        print(tok)
+        assert np.equal(chrs[s:e, ...], chrs[s]).all(), "Characters and tokens are not aligned!"
+        features.append(chrs[s])
+    return np.array(features)
