@@ -16,7 +16,7 @@ from utils.audio import compute_pitch, compute_pitch_slope
 from utils.helpers import DEBUG
 
 
-UNK_FEATURE = 0
+PAD_FEATURE = 0
 
 
 @dataclass
@@ -114,7 +114,7 @@ def getchr(text: str, words: Iterable[Word]) -> NDArray:
     word = next(words, None)
     assert text and word, 'Both sequences should be non-empty!'
 
-    pads = [UNK_FEATURE] * len(word.feats)
+    pads = [PAD_FEATURE] * len(word.feats)
     i = 0
     features = []
     while i < len(text):
