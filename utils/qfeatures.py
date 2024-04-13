@@ -59,7 +59,6 @@ def compute_word_features(
     times, f0 = compute_pitch(audio, rate)
 
     markup = alignment[0]
-    prev = 0
     for index, interval in enumerate(markup):
         t0, t1, word = interval.minTime, interval.maxTime, interval.mark
         dt = t1 - t0
@@ -119,7 +118,7 @@ def getchr(text: str, words: Iterable[Word]) -> NDArray:
     features = []
     while i < len(text):
         char = text[i]
-        if word and word.text.startswith(char):
+        if word and text[i: i + len(word.text)].startswith(word):
             features.extend([list(word.feats)]*len(word.text))
             i += len(word.text)
             word = next(words, None)

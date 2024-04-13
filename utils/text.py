@@ -45,3 +45,10 @@ def clean(text: str) -> str:
     text = expand_abbreviations(text.lower())
     text = collapse_whitespace(text)
     return text
+
+
+_pad = '_'
+_punctuation = ';:,.!?—…"«»“” '
+_letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+
+symbols = [_pad] + list(_punctuation) + list(_letters)
