@@ -106,6 +106,25 @@ def quantize_features(words: Iterable[Word], bins: int = 5) -> Iterable[Word]:
         yield w
 
 
+def compute_word_spans(text: str, words: Iterable[Word]) -> NDArray:
+    """Computes word spans [start, end] in the given text."""
+
+    words = iter(words)
+    word = next(words, None)
+    assert text and word, 'Both sequences should be non-empty!'
+
+    i = 0
+    spans = []
+    while i < len(text):
+        if word and text[i: i + len(word.text)].startswith(word.text):
+            spans.append([i, i + len(word.text)])
+            i += len(word.text)
+            word = next(words, None)
+        else:
+            i += 1
+    return np.array(spans)
+
+
 def getchr(text: str, words: Iterable[Word]) -> NDArray:
     """Populates word-level q-features per each text character as an NDArray."""
 
@@ -117,7 +136,6 @@ def getchr(text: str, words: Iterable[Word]) -> NDArray:
     i = 0
     features = []
     while i < len(text):
-        char = text[i]
         if word and text[i: i + len(word.text)].startswith(word):
             features.extend([list(word.feats)]*len(word.text))
             i += len(word.text)
@@ -128,23 +146,33 @@ def getchr(text: str, words: Iterable[Word]) -> NDArray:
     return np.array(features)
 
 
-def printchr(text: str, words: Iterable[Word]) -> None:
+def printchr(text: str, words: Iterable[Word], spans: NDArray | None = None) -> None:
     """Prints the word-level features aligned to char text."""
 
+    spans = compute_word_spans(text, words) if spans is None else spans
+    assert len(spans), 'Word spans should be non-empty!'
+
+    word = next(iter(words))
+    assert word
+
+    features = np.full((len(text), len(word.feats)), fill_value=PAD_FEATURE, dtype=np.uint8)
+    for word, span in zip(words, spans):
+        s, e = span
+        features[s:e,:] = np.array(word.feats)
+
     print(text)
-    for line in getchr(text, words).T:
+    for line in features.T:
         print(''.join(map(str, line)))
 
 
-def gettok(text: str, words: Iterable[Word], offsets: NDArray) -> NDArray:
-    """Populates word-level q-features per each token as an NDArray."""
-
-    assert len(offsets), 'Offsets should be non-empty!'
-    features = []
-    chrs = getchr(text, words)
-    for offset in offsets:
-        s, e = offset
-        if DEBUG > 1: print(text[s:e])
-        assert np.equal(chrs[s:e, ...], chrs[s]).all(), 'Characters and tokens are not aligned!'
-        features.append(chrs[s])
-    return np.array(features)
+# if __name__ == '__main__':
+#     text = 'ah, shit! here we go again...'
+#     words = [
+#         Word(text='ah', index=0, start=0, end=1, feats=WordFeatures(volume=1, speed=1, pitch_mean=1, pitch_fslope=1, pitch_lslope=1, pitch_rslope=2)),
+#         Word(text='shit', index=1, start=0, end=1, feats=WordFeatures(volume=2, speed=2, pitch_mean=2, pitch_fslope=2, pitch_lslope=2, pitch_rslope=3)),
+#         Word(text='here', index=1, start=0, end=1, feats=WordFeatures(volume=3, speed=3, pitch_mean=3, pitch_fslope=3, pitch_lslope=3, pitch_rslope=4)),
+#         Word(text='we', index=1, start=0, end=1, feats=WordFeatures(volume=4, speed=4, pitch_mean=4, pitch_fslope=4, pitch_lslope=4, pitch_rslope=5)),
+#         Word(text='go', index=1, start=0, end=1, feats=WordFeatures(volume=5, speed=5, pitch_mean=5, pitch_fslope=5, pitch_lslope=5, pitch_rslope=6))
+#     ]
+#     print(compute_word_spans(text, words))
+#     printchr(text, words)

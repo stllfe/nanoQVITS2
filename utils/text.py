@@ -25,6 +25,15 @@ _ABBREVIATIONS = [(re.compile('\\b%s\\.' % x[0], re.IGNORECASE), x[1]) for x in 
     ('ft', 'fort'),
 ]]
 
+_PAD = '_'
+_PUNCTUATION = ';:,.!?—…"«»“” '
+_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+
+SYMBOLS = [_PAD] + list(_PUNCTUATION) + list(_LETTERS)
+
+SYMBOL_TO_INT = {s: i for i, s in enumerate(SYMBOLS)}
+INT_TO_SYMBOL = {i: s for i, s in enumerate(SYMBOLS)}
+
 
 def expand_abbreviations(text: str) -> str:
     for pattern, repl in _ABBREVIATIONS:
@@ -47,8 +56,13 @@ def clean(text: str) -> str:
     return text
 
 
-_pad = '_'
-_punctuation = ';:,.!?—…"«»“” '
-_letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+def encode_text(text: str) -> list[int]:
+    """Converts a string of text to a sequence of IDs corresponding to the symbols."""
 
-symbols = [_pad] + list(_punctuation) + list(_letters)
+    return [SYMBOL_TO_INT[s] for s in text if s in SYMBOL_TO_INT]
+
+
+def decode_text(sequence: list[int]) -> str:
+    """Converts a sequence of IDs back to a string."""
+
+    return ''.join([INT_TO_SYMBOL[i] for i in sequence])

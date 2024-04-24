@@ -5,14 +5,27 @@ from numpy.typing import NDArray
 from scipy.io import wavfile
 from scipy import stats
 
+import warnings
+
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='scipy.stats')
+
 
 MIN_F0 = 40
 MAX_F0 = 1100
+MAX_WAV_VALUE = 32768.0
 
 
 def readwav(path: str, mmap: bool = False) -> tuple[NDArray, int]:
     rate, data = wavfile.read(path, mmap=mmap)
     return data, rate
+
+
+def writewav(wav: NDArray, rate: int, path: str) -> None:
+    wavfile.write(path, rate=rate, data=wav)
+
+
+def normalize(wav: NDArray) -> NDArray:
+    return wav / np.max(np.abs(wav)) * MAX_WAV_VALUE
 
 
 def compute_pitch(audio: NDArray, rate: int, freq: float = 0.01) -> tuple[NDArray, NDArray]:

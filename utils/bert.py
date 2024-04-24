@@ -1,5 +1,7 @@
 """Utilities for extracting features from a pretrained BERT-like encoders."""
 
+from functools import cache
+
 import torch
 
 from numpy.typing import NDArray
@@ -15,6 +17,7 @@ from transformers import (
 MODEL = 'cointegrated/rubert-tiny2'
 
 
+@cache
 def load() -> tuple[PreTrainedModel, PreTrainedTokenizer]:
     model = AutoModel.from_pretrained(MODEL)
     model.eval()
@@ -32,7 +35,7 @@ def embed(
     """Extracts token embeddings with the given model.
 
     Returns:
-        A tuple of embeddings and token offsets (T x 2 [start, end]) in the given texts:
+        A tuple of embeddings and token spans (T x 2 [start, end]) in the given texts:
     """
 
     data = tokenizer(
@@ -41,9 +44,9 @@ def embed(
         return_offsets_mapping=True,
         return_tensors='pt',
     )
-    offsets = data.pop('offset_mapping')[0]
+    spans = data.pop('offset_mapping')[0]
     data.to(model.device)
 
     embeddings = model(**data)[0]
     embeddings = embeddings.detach().cpu().numpy()
-    return embeddings, offsets.numpy()
+    return embeddings, spans.numpy()
