@@ -125,27 +125,6 @@ def compute_word_spans(text: str, words: Iterable[Word]) -> NDArray:
     return np.array(spans)
 
 
-def getchr(text: str, words: Iterable[Word]) -> NDArray:
-    """Populates word-level q-features per each text character as an NDArray."""
-
-    words = iter(words)
-    word = next(words, None)
-    assert text and word, 'Both sequences should be non-empty!'
-
-    pads = [PAD_FEATURE] * len(word.feats)
-    i = 0
-    features = []
-    while i < len(text):
-        if word and text[i: i + len(word.text)].startswith(word):
-            features.extend([list(word.feats)]*len(word.text))
-            i += len(word.text)
-            word = next(words, None)
-        else:
-            features.append(pads)
-            i += 1
-    return np.array(features)
-
-
 def printchr(text: str, words: Iterable[Word], spans: NDArray | None = None) -> None:
     """Prints the word-level features aligned to char text."""
 

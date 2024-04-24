@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
 
 import os
 import sys
@@ -18,11 +17,9 @@ sys.path.append(os.path.dirname(__file__))
 import h5py
 import numpy as np
 import requests
-import torch.utils.data
 import tyro
 
 from numpy.typing import NDArray
-
 from textgrid import TextGrid
 from tqdm import tqdm
 
@@ -87,8 +84,8 @@ def load_from_metadata(filename: str = 'metadata.csv') -> Iterable[Utterance]:
 def load_from_prepared() -> Iterable[Utterance]:
     """Loads dataset samples from disk."""
 
-    src = Path(DATA_DIR, DIR, 'wavs')
-    for p in src.glob('*.lab'):
+    wavs_dir = Path(DATA_DIR, DIR, 'wavs')
+    for p in wavs_dir.glob('*.lab'):
         with open(p, mode='r', encoding='utf-8') as file:
             text = file.readline()
             yield Utterance(p.stem, text.strip())
@@ -125,63 +122,61 @@ def download() -> None:
 def prepare(dst: str | None = None) -> None:
     """Prepares all the necessary files for alignment."""
 
-    src = os.path.join(DATA_DIR, DIR, 'wavs')
-    dst = dst or src  # overwrite files if `None`
+    wavs_dir = os.path.join(DATA_DIR, DIR, 'wavs')
 
     for sample in tqdm(load_from_metadata(), desc='Preparing samples'):
-        wavpath = os.path.join(src, f'{sample.filename}.wav')
+        wavpath = os.path.join(wavs_dir, f'{sample.filename}.wav')
         try:
             wav, sr = readwav(wavpath)
         except FileNotFoundError:
             tqdm.write(f'Not found: {wavpath}', sys.stderr)
             continue
+        writewav(normalize(wav), sr, os.path.join(wavs_dir, os.path.basename(wavpath)))
 
-        writewav(normalize(wav), sr, os.path.join(dst, os.path.basename(wavpath)))
-
-        labpath = os.path.join(dst, f'{sample.filename}.lab')
+        labpath = os.path.join(wavs_dir, f'{sample.filename}.lab')
         with open(labpath, mode='w', encoding='utf-8') as file:
             file.write(clean(sample.text) + '\n')
 
 
-def process_sample(sample: Utterance) -> tuple[Utterance, list[Word]]:
-    wavpath = Path(WAVS_DIR, sample.filename).with_suffix('.wav')
-    mfapath = Path(MFAS_DIR, sample.filename).with_suffix('.TextGrid')
+def process_utterance(uttr: Utterance) -> tuple[Utterance, list[Word]]:
+    wavpath = Path(WAVS_DIR, uttr.filename).with_suffix('.wav')
+    mfapath = Path(MFAS_DIR, uttr.filename).with_suffix('.TextGrid')
 
     audio, rate = readwav(wavpath.as_posix())
     alignment = TextGrid.fromFile(mfapath.as_posix())
     words = compute_word_features(audio, alignment, rate=rate, min_duration=0.01)
 
-    return sample, list(words)
+    return uttr, list(words)
 
 
 def process() -> None:
     words: list[Word] = []
     uttrs: list[Utterance] = []
     with mp.Pool(processes=NUM_WORKERS) as pool, tqdm(desc='Processing utterances') as pbar:
-        for s, w in pool.imap_unordered(process_sample, load_from_prepared()):
-            uttrs.extend([s] * len(w))
+        for u, w in pool.imap_unordered(process_utterance, load_from_prepared()):
+            uttrs.extend([u] * len(w))
             words.extend(w)
             pbar.update(1)
 
-    data = defaultdict(list)
+    utt2words = defaultdict(list)
     with tqdm(desc='Compiling quantized features', total=len(words)) as pbar:
-        for s, w in zip(uttrs, quantize_features(words)):
-            data[s].append(w)
+        for u, w in zip(uttrs, quantize_features(words)):
+            utt2words[u].append(w)
             pbar.update(1)
 
     model, tokenizer = bert.load()
     os.makedirs(FEAT_DIR, exist_ok=True)
-    for s, ws in tqdm(data.items(), total=len(data), desc='Writing files to disk'):
+    for u, ws in tqdm(utt2words.items(), total=len(utt2words), desc='Writing files to disk'):
         ws.sort(key=lambda word: word.index)
-        tokembs, tokspan = bert.embed(s.text, model, tokenizer)
+        tokembs, tokspan = bert.embed(u.text, model, tokenizer)
         q = QSample(
-            symbols=np.asarray(encode_text(s.text), dtype=np.uint8),
+            symbols=np.asarray(encode_text(u.text), dtype=np.uint8),
             tokembs=tokembs,
             tokspan=tokspan,
-            wrdspan=compute_word_spans(s.text, ws),
+            wrdspan=compute_word_spans(u.text, ws),
             qfeatures=np.asarray([w.feats for w in ws]).astype(np.uint8),
         )
-        q.save(os.path.join(FEAT_DIR, f'{s.filename}.h5'))
+        q.save(os.path.join(FEAT_DIR, f'{u.filename}.h5'))
 
 
 class QSample(NamedTuple):
@@ -203,10 +198,6 @@ class QSample(NamedTuple):
         with h5py.File(path, mode='w') as h5:
             for k, v in self._asdict().items():
                 h5.create_dataset(k, data=v)
-
-
-class QDataset(torch.utils.data.Dataset):
-    pass
 
 
 if __name__ == '__main__':
