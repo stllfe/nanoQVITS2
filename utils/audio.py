@@ -1,11 +1,12 @@
+import warnings
+
 import numpy as np
 import pyreaper
 
 from numpy.typing import NDArray
-from scipy.io import wavfile
 from scipy import stats
+from scipy.io import wavfile
 
-import warnings
 
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='scipy.stats')
 
@@ -36,12 +37,7 @@ def compute_pitch(audio: NDArray, rate: int, freq: float = 0.01) -> tuple[NDArra
     """
 
     _, _, times, f0, _ = pyreaper.reaper(
-        audio,
-        rate,
-        minf0=MIN_F0,
-        maxf0=MAX_F0,
-        frame_period=freq,
-        unvoiced_cost=0.9
+        audio, rate, minf0=MIN_F0, maxf0=MAX_F0, frame_period=freq, unvoiced_cost=0.9
     )
     return times, f0
 

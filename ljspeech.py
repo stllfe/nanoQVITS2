@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-
+import multiprocessing as mp
 import os
 import sys
 
-import multiprocessing as mp
-
+from collections import defaultdict
 from pathlib import Path
-from typing import Iterable, NamedTuple, Union
+from typing import Iterable, NamedTuple
+
 
 sys.path.append(os.path.dirname(__file__))
 
@@ -24,21 +23,16 @@ from textgrid import TextGrid
 from tqdm import tqdm
 
 from utils import bert
-
-from utils.audio import (
-    normalize,
-    readwav,
-    writewav,
-)
+from utils.audio import normalize
+from utils.audio import readwav
+from utils.audio import writewav
 from utils.data import Utterance
-from utils.text import clean, encode_text
-
-from utils.qfeatures import (
-    compute_word_features,
-    compute_word_spans,
-    quantize_features,
-    Word,
-)
+from utils.qfeatures import Word
+from utils.qfeatures import compute_word_features
+from utils.qfeatures import compute_word_spans
+from utils.qfeatures import quantize_features
+from utils.text import clean
+from utils.text import encode_text
 
 
 NUM_WORKERS = (os.cpu_count() or 1) // 2
@@ -59,13 +53,16 @@ def download_file(url: str, fname: str, chunk_size: int = 1024) -> None:
 
     response = requests.get(url, stream=True)
     total = int(response.headers.get('content-length', 0))
-    with open(fname, mode='wb') as file, tqdm(
-        desc=fname,
-        total=total,
-        unit='iB',
-        unit_scale=True,
-        unit_divisor=1024,
-    ) as bar:
+    with (
+        open(fname, mode='wb') as file,
+        tqdm(
+            desc=fname,
+            total=total,
+            unit='iB',
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as bar,
+    ):
         for data in response.iter_content(chunk_size=chunk_size):
             size = file.write(data)
             bar.update(size)
@@ -112,7 +109,7 @@ def download() -> None:
     if not os.path.exists(data_dir):
         print(f'Unpacking {filename}...')
         if os.system(f'tar -xjf {filename} -C {DATA_DIR}'):
-            raise IOError(f'Error while extracting data!')
+            raise IOError('Error while extracting data!')
     else:
         print(f'{data_dir} already exists, skipping unpacking...')
 
@@ -122,20 +119,52 @@ def download() -> None:
 def prepare(dst: str | None = None) -> None:
     """Prepares all the necessary files for alignment."""
 
-    wavs_dir = os.path.join(DATA_DIR, DIR, 'wavs')
+    wavs_dir = Path(DATA_DIR, DIR, 'wavs')
 
-    for sample in tqdm(load_from_metadata(), desc='Preparing samples'):
-        wavpath = os.path.join(wavs_dir, f'{sample.filename}.wav')
+    for ut in tqdm(load_from_metadata(), desc='Preparing samples'):
+        wavpath = Path(wavs_dir, ut.filename).with_suffix('.wav')
         try:
             wav, sr = readwav(wavpath)
         except FileNotFoundError:
             tqdm.write(f'Not found: {wavpath}', sys.stderr)
             continue
-        writewav(normalize(wav), sr, os.path.join(wavs_dir, os.path.basename(wavpath)))
+        writewav(normalize(wav), sr, wavpath)
 
-        labpath = os.path.join(wavs_dir, f'{sample.filename}.lab')
+        labpath = Path(wavs_dir, ut.filename).with_suffix('.lab')
         with open(labpath, mode='w', encoding='utf-8') as file:
-            file.write(clean(sample.text) + '\n')
+            file.write(clean(ut.text) + '\n')
+
+
+def process() -> None:
+    """Extracts all features for training and stores them on disk."""
+
+    words: list[Word] = []
+    uttrs: list[Utterance] = []
+    with mp.Pool(processes=NUM_WORKERS) as pool, tqdm(desc='Processing utterances') as pbar:
+        for ut, w in pool.imap_unordered(process_utterance, load_from_prepared()):
+            uttrs.extend([ut] * len(w))
+            words.extend(w)
+            pbar.update(1)
+
+    ut2ws = defaultdict(list)
+    with tqdm(desc='Compiling quantized features', total=len(words)) as pbar:
+        for ut, w in zip(uttrs, quantize_features(words)):
+            ut2ws[ut].append(w)
+            pbar.update(1)
+
+    model, tokenizer = bert.load()
+    os.makedirs(FEAT_DIR, exist_ok=True)
+    for ut, ws in tqdm(ut2ws.items(), total=len(ut2ws), desc='Writing files to disk'):
+        ws.sort(key=lambda word: word.index)
+        tokembs, tokspan = bert.embed(ut.text, model, tokenizer)
+        q = QSample(
+            symbols=np.asarray(encode_text(ut.text), dtype=np.uint8),
+            tokembs=tokembs,
+            tokspan=tokspan,
+            wrdspan=compute_word_spans(ut.text, ws),
+            qfeatures=np.asarray([w.feats for w in ws]).astype(np.uint8),
+        )
+        q.save(Path(FEAT_DIR, ut.filename).with_suffix('.h5'))
 
 
 def process_utterance(uttr: Utterance) -> tuple[Utterance, list[Word]]:
@@ -147,36 +176,6 @@ def process_utterance(uttr: Utterance) -> tuple[Utterance, list[Word]]:
     words = compute_word_features(audio, alignment, rate=rate, min_duration=0.01)
 
     return uttr, list(words)
-
-
-def process() -> None:
-    words: list[Word] = []
-    uttrs: list[Utterance] = []
-    with mp.Pool(processes=NUM_WORKERS) as pool, tqdm(desc='Processing utterances') as pbar:
-        for u, w in pool.imap_unordered(process_utterance, load_from_prepared()):
-            uttrs.extend([u] * len(w))
-            words.extend(w)
-            pbar.update(1)
-
-    utt2words = defaultdict(list)
-    with tqdm(desc='Compiling quantized features', total=len(words)) as pbar:
-        for u, w in zip(uttrs, quantize_features(words)):
-            utt2words[u].append(w)
-            pbar.update(1)
-
-    model, tokenizer = bert.load()
-    os.makedirs(FEAT_DIR, exist_ok=True)
-    for u, ws in tqdm(utt2words.items(), total=len(utt2words), desc='Writing files to disk'):
-        ws.sort(key=lambda word: word.index)
-        tokembs, tokspan = bert.embed(u.text, model, tokenizer)
-        q = QSample(
-            symbols=np.asarray(encode_text(u.text), dtype=np.uint8),
-            tokembs=tokembs,
-            tokspan=tokspan,
-            wrdspan=compute_word_spans(u.text, ws),
-            qfeatures=np.asarray([w.feats for w in ws]).astype(np.uint8),
-        )
-        q.save(os.path.join(FEAT_DIR, f'{u.filename}.h5'))
 
 
 class QSample(NamedTuple):
@@ -201,4 +200,11 @@ class QSample(NamedTuple):
 
 
 if __name__ == '__main__':
-    tyro.cli(Union[download, prepare, process], description=__doc__)
+    tyro.extras.subcommand_cli_from_dict(
+        {
+            'download': download,
+            'prepare': prepare,
+            'process': process,
+        },
+        description=__doc__,
+    )

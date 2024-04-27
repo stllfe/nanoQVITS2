@@ -12,7 +12,8 @@ import numpy as np
 from numpy.typing import NDArray
 from textgrid import TextGrid
 
-from utils.audio import compute_pitch, compute_pitch_slope
+from utils.audio import compute_pitch
+from utils.audio import compute_pitch_slope
 from utils.helpers import DEBUG
 
 
@@ -67,7 +68,7 @@ def compute_word_features(
             continue
 
         f0w = f0[(times >= t0) & (times <= t1)]
-        chunk = audio[int(rate * t0):int(rate * t1)]
+        chunk = audio[int(rate * t0) : int(rate * t1)]
         mid = len(f0w) // 2
 
         yield Word(
@@ -82,7 +83,7 @@ def compute_word_features(
                 pitch_fslope=compute_pitch_slope(f0w),
                 pitch_lslope=compute_pitch_slope(f0w[:mid]),
                 pitch_rslope=compute_pitch_slope(f0w[mid:]),
-            )
+            ),
         )
 
 
@@ -91,13 +92,16 @@ def quantize_features(words: Iterable[Word], bins: int = 5) -> Iterable[Word]:
 
     feats = np.array([w.feats for w in words])
     for j in range(feats.shape[1]):
-        if DEBUG: print(f'Feature: {j}')
+        if DEBUG:
+            print(f'Feature: {j}')
         # todo: mean imputation maybe not the best idea though
         mean = np.nanmean(feats[:, j]).item()
-        if DEBUG: print(f'Filling NaNs with {mean=:.4f}')
+        if DEBUG:
+            print(f'Filling NaNs with {mean=:.4f}')
         np.nan_to_num(feats[:, j], nan=mean, copy=False)
         _, edges = np.histogram(feats[:, j], bins=bins)
-        if DEBUG: print(f'Edges: {edges}\n')
+        if DEBUG:
+            print(f'Edges: {edges}\n')
         feats[:, j] = np.digitize(feats[:, j], bins=edges, right=True)
     feats = feats.astype(np.uint8)
     for i, w in enumerate(words):
@@ -116,7 +120,7 @@ def compute_word_spans(text: str, words: Iterable[Word]) -> NDArray:
     i = 0
     spans = []
     while i < len(text):
-        if word and text[i: i + len(word.text)].startswith(word.text):
+        if word and text[i : i + len(word.text)].startswith(word.text):
             spans.append([i, i + len(word.text)])
             i += len(word.text)
             word = next(words, None)
@@ -137,7 +141,7 @@ def printchr(text: str, words: Iterable[Word], spans: NDArray | None = None) -> 
     features = np.full((len(text), len(word.feats)), fill_value=PAD_FEATURE, dtype=np.uint8)
     for word, span in zip(words, spans):
         s, e = span
-        features[s:e,:] = np.array(word.feats)
+        features[s:e, :] = np.array(word.feats)
 
     print(text)
     for line in features.T:

@@ -5,12 +5,11 @@ from functools import cache
 import torch
 
 from numpy.typing import NDArray
-from transformers import (
-    AutoModel,
-    AutoTokenizer,
-    PreTrainedModel,
-    PreTrainedTokenizer
-)
+from transformers import AutoModel
+from transformers import AutoTokenizer
+from transformers import PreTrainedModel
+from transformers import PreTrainedTokenizer
+
 
 # this may be not the best model for the given task, check this later:
 # https://github.com/avidale/encodechka
