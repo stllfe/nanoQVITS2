@@ -24,7 +24,7 @@ from utils import bert
 from utils.audio import normalize
 from utils.audio import readwav
 from utils.audio import writewav
-from utils.data import Sample
+from utils.data import Features
 from utils.data import Utterance
 from utils.qfeatures import Word
 from utils.qfeatures import compute_word_features
@@ -163,14 +163,14 @@ def process() -> None:
         if TEXT_MIN_LENGTH > len(symbols) > TEXT_MAX_LENGTH:
             tqdm.write(f'Skip due to text length: {ut.filename}', sys.stderr)
             continue
-        q = Sample(
+        feat = Features(
             symbols=np.asarray(symbols, dtype=np.uint8),
             tokembs=tokembs,
             tokspan=tokspan,
             wrdspan=compute_word_spans(ut.text, ws),
             qfeatures=np.asarray([w.feats for w in ws]).astype(np.uint8),
         )
-        q.save(Path(FEAT_DIR, ut.filename).with_suffix('.h5'))
+        feat.save(Path(FEAT_DIR, ut.filename).with_suffix('.h5'))
 
 
 def process_utterance(uttr: Utterance) -> tuple[Utterance, list[Word]]:
@@ -186,10 +186,10 @@ def process_utterance(uttr: Utterance) -> tuple[Utterance, list[Word]]:
 
 if __name__ == '__main__':
     tyro.extras.subcommand_cli_from_dict(
-        {
+        description=__doc__,
+        subcommands={
             'download': download,
             'prepare': prepare,
             'process': process,
         },
-        description=__doc__,
     )

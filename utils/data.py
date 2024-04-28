@@ -46,7 +46,7 @@ class Utterance(NamedTuple):
 
 
 @jaxtyped
-class Sample(NamedTuple):
+class Features(NamedTuple):
     symbols: UInt8[Array, '*B text_length']
     tokembs: Float[Array, '*B num_tokens']
     tokspan: UInt32[Array, '*B num_tokens 2']
@@ -54,38 +54,38 @@ class Sample(NamedTuple):
     qfeatures: UInt8[Array, '*B num_words num_qfeats']
 
     @classmethod
-    def load(cls, path: str | os.PathLike) -> Sample:
+    def load(cls, path: str | os.PathLike) -> Features:
         d = {}
         with h5py.File(path, mode='r') as h5:
             for k in cls._fields:
                 d[k] = np.asarray(h5[k])
-        return Sample(**d)
+        return Features(**d)
 
     def save(self, path: str | os.PathLike) -> None:
         with h5py.File(path, mode='w') as h5:
             for k, v in self._asdict().items():
                 h5.create_dataset(k, data=v)
 
-    def numpy(self) -> Sample:
+    def numpy(self) -> Features:
         d = self._asdict()
         for k, v in d.items():
             d[k] = v.numpy() if isinstance(v, torch.Tensor) else v
             assert isinstance(d[k], np.ndarray)
-        return Sample(**d)
+        return Features(**d)
 
-    def torch(self, device: str | torch.device | None = None) -> Sample:
+    def torch(self, device: str | torch.device | None = None) -> Features:
         d = self._asdict()
         for k, v in d.items():
             v = torch.from_numpy(v) if isinstance(v, np.ndarray) else v
             assert isinstance(v, torch.Tensor)
             # TODO: pin memory here?
             d[k] = v.to(device, non_blocking=True)
-        return Sample(**d)
+        return Features(**d)
 
 
 @jaxtyped
 class BatchPadded(NamedTuple):
-    feat: list[Sample]
+    feat: list[Features]
     text: Long[Tensor, 'B max_text_length']
     text_length: Long[Tensor, ' B']
     spec: SpecForm
@@ -145,8 +145,8 @@ class TTSDataset(torch.utils.data.Dataset):
     def lengths(self) -> list[int]:
         return self._lengths
 
-    def get_feats(self, featpath: str | os.PathLike) -> Sample:
-        feat = Sample.load(featpath)
+    def get_feats(self, featpath: str | os.PathLike) -> Features:
+        feat = Features.load(featpath)
         if self._config.text.add_blank:
             feat = feat._replace(symbols=commons.intersperse(feat.symbols, 0))
         return feat
@@ -199,7 +199,7 @@ class TTSDataset(torch.utils.data.Dataset):
             np.save(specpath, spec.numpy())
         return spec, wave
 
-    def __getitem__(self, index: int) -> tuple[Sample, SpecForm, WaveForm]:
+    def __getitem__(self, index: int) -> tuple[Features, SpecForm, WaveForm]:
         wp, fp = self._samples[index]
         spec, wave = self.get_audio(wp)
         feat = self.get_feats(fp)
@@ -209,10 +209,13 @@ class TTSDataset(torch.utils.data.Dataset):
         return len(self._samples)
 
 
-def collate_fn(batch: list[tuple[Sample, SpecForm, WaveForm]]) -> BatchPadded:
+def collate_fn(batch: list[tuple[Features, SpecForm, WaveForm]]) -> BatchPadded:
     """Collates dataset features in tensors of equal length and a batch dimension."""
 
     feats, specs, waves = zip(*batch)
+
+    # shorthand for feats->symbols
+    # todo: maybe consider removing texts from the features then?
     texts = tuple(f.symbols for f in feats)
 
     text_padded = pad_sequence(texts, batch_first=True)

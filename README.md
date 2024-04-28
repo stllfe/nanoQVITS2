@@ -24,6 +24,7 @@ mfa align \
 --single_speaker \
 --no_textgrid_cleanup \
 data/LJSpeech-1.1/wavs/ \
-english_mfa english_mfa \
+english_mfa \
+english_mfa \
 data/LJSpeech-1.1/alignment
 ```
