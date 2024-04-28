@@ -33,8 +33,7 @@ from vits2.losses import (
     subband_stft_loss
 )
 from vits2.mel_processing import mel_spectrogram_torch, spec_to_mel_torch
-from utils.text import symbols
-
+from utils.text import SYMBOLS
 torch.autograd.set_detect_anomaly(True)
 torch.backends.cudnn.benchmark = True
 global_step = 0
@@ -43,14 +42,14 @@ global_step = 0
 # - base vits2 : Aug 29, 2023
 def main():
     """Assume Single Node Multi GPUs Training Only"""
-    # assert torch.cuda.is_available(), "CPU training is not allowed."
+    assert torch.cuda.is_available(), "CPU training is not allowed."
 
-    # n_gpus = torch.cuda.device_count()
-    # os.environ['MASTER_ADDR'] = 'localhost'
-    # os.environ['MASTER_PORT'] = '6060'
+    n_gpus = torch.cuda.device_count()
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '6060'
 
-    # hps = utils.get_hparams()
-    # mp.spawn(run, nprocs=n_gpus, args=(n_gpus, hps,))
+    hps = utils.get_hparams()
+    mp.spawn(run, nprocs=n_gpus, args=(n_gpus, hps,))
     run(0, n_gpus=1, hps=utils.get_hparams())
 
 
@@ -64,12 +63,12 @@ def run(rank, n_gpus, hps):
         writer = SummaryWriter(log_dir=hps.model_dir)
         writer_eval = SummaryWriter(log_dir=os.path.join(hps.model_dir, "eval"))
 
-    # if os.name == 'nt':
-    #     dist.init_process_group(backend='gloo', init_method='env://', world_size=n_gpus, rank=rank)
-    # else:
-    #     dist.init_process_group(backend='nccl', init_method='env://', world_size=n_gpus, rank=rank)
+    if os.name == 'nt':
+        dist.init_process_group(backend='gloo', init_method='env://', world_size=n_gpus, rank=rank)
+    else:
+        dist.init_process_group(backend='nccl', init_method='env://', world_size=n_gpus, rank=rank)
     torch.manual_seed(hps.train.seed)
-    # torch.cuda.set_device(rank)
+    torch.cuda.set_device(rank)
 
     if "use_mel_posterior_encoder" in hps.model.keys() and hps.model.use_mel_posterior_encoder == True:  # P.incoder for vits2
         print("Using mel posterior encoder for VITS2")
@@ -80,23 +79,23 @@ def run(rank, n_gpus, hps):
         posterior_channels = hps.data.filter_length // 2 + 1
         hps.data.use_mel_posterior_encoder = False
 
-    # train_dataset = TextAudioLoader(hps.data.training_files, hps.data)
-    # train_sampler = DistributedBucketSampler(
-    #     train_dataset,
-    #     hps.train.batch_size,
-    #     [32, 300, 400, 500, 600, 700, 800, 900, 1000],
-    #     num_replicas=n_gpus,
-    #     rank=rank,
-    #     shuffle=True)
+    train_dataset = TextAudioLoader(hps.data.training_files, hps.data)
+    train_sampler = DistributedBucketSampler(
+        train_dataset,
+        hps.train.batch_size,
+        [32, 300, 400, 500, 600, 700, 800, 900, 1000],
+        num_replicas=n_gpus,
+        rank=rank,
+        shuffle=True)
 
-    # collate_fn = TextAudioCollate()
-    # train_loader = DataLoader(train_dataset, num_workers=8, shuffle=False, pin_memory=True,
-    #                           collate_fn=collate_fn, batch_sampler=train_sampler)
-    # if rank == 0:
-    #     eval_dataset = TextAudioLoader(hps.data.validation_files, hps.data)
-    #     eval_loader = DataLoader(eval_dataset, num_workers=1, shuffle=False,
-    #                              batch_size=hps.train.batch_size, pin_memory=True,
-    #                              drop_last=False, collate_fn=collate_fn)
+    collate_fn = TextAudioCollate()
+    train_loader = DataLoader(train_dataset, num_workers=8, shuffle=False, pin_memory=True,
+                              collate_fn=collate_fn, batch_sampler=train_sampler)
+    if rank == 0:
+        eval_dataset = TextAudioLoader(hps.data.validation_files, hps.data)
+        eval_loader = DataLoader(eval_dataset, num_workers=1, shuffle=False,
+                                 batch_size=hps.train.batch_size, pin_memory=True,
+                                 drop_last=False, collate_fn=collate_fn)
     # some of these flags are not being used in the code and directly set in hps json file.
     # they are kept here for reference and prototyping.
 
@@ -147,7 +146,7 @@ def run(rank, n_gpus, hps):
                 3,
                 0.1,
                 gin_channels=hps.model.gin_channels if hps.data.n_speakers != 0 else 0,
-            )#.cuda(rank)
+            ).cuda(rank)
         elif duration_discriminator_type == "dur_disc_2":
             net_dur_disc = DurationDiscriminator2(
                 hps.model.hidden_channels,
@@ -155,7 +154,7 @@ def run(rank, n_gpus, hps):
                 3,
                 0.1,
                 gin_channels=hps.model.gin_channels if hps.data.n_speakers != 0 else 0,
-            )#.cuda(rank)
+            ).cuda(rank)
         '''
         net_dur_disc = DurationDiscriminator(
             hps.model.hidden_channels,
@@ -171,12 +170,12 @@ def run(rank, n_gpus, hps):
         use_duration_discriminator = False
 
     net_g = SynthesizerTrn(
-        len(symbols),
+        len(SYMBOLS),
         posterior_channels,
         hps.train.segment_size // hps.data.hop_length,
         mas_noise_scale_initial=mas_noise_scale_initial,
         noise_scale_delta=noise_scale_delta,
-        **hps.model)#.cuda(rank)
+        **hps.model).cuda(rank)
     net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank)
 
     optim_g = torch.optim.AdamW(

@@ -1,213 +1,275 @@
+from __future__ import annotations
+
+import operator as op
 import os
 import random
+import sys
 
-from typing import NamedTuple
+from collections.abc import Sequence
+from pathlib import Path
+from typing import NamedTuple, TypeVar
 
+import h5py
+import numpy as np
 import torch
-
 import torch.utils.data
 
+from beartype import beartype
+from jaxtyping import Float, Int64, UInt8, UInt32, jaxtyped
+from numpy.typing import NDArray
+from torch import Tensor
+from torch.nn.utils.rnn import pad_sequence
+from tqdm import tqdm
+
+from config import FeaturesConfig
+from utils.audio import MAX_WAV_VALUE
 from utils.audio import readwav
-from utils.bert import embed
-from utils.text import encode_text
-
+from utils.helpers import debug
 from vits2 import commons
-from vits2.mel_processing import spectrogram_torch, mel_spectrogram_torch
+from vits2.mel_processing import mel_spectrogram_torch
+from vits2.mel_processing import spectrogram_torch
+
+jaxtyped = jaxtyped(typechecker=beartype)
+
+Array = TypeVar('Array', Tensor, NDArray)
+
+Long = Int64
+WaveForm = Float[Tensor, '*B wave_samples']
+SpecForm = Float[Tensor, '*B spec_samples']
 
 
+@beartype
 class Utterance(NamedTuple):
     filename: str
     text: str
 
 
-class TextAudioLoader(torch.utils.data.Dataset):
-    """
-        1) loads audio, text pairs
-        2) normalizes text and converts them to sequences of integers
-        3) computes spectrograms from audio files.
-    """
+@jaxtyped
+class Sample(NamedTuple):
+    symbols: UInt8[Array, '*B text_length']
+    tokembs: Float[Array, '*B num_tokens']
+    tokspan: UInt32[Array, '*B num_tokens 2']
+    wrdspan: UInt32[Array, '*B num_words 2']
+    qfeatures: UInt8[Array, '*B num_words num_qfeats']
 
-    def __init__(self, samples: list[Utterance], hparams) -> None:
-        self.hparams = hparams
-        self.samples = samples
+    @classmethod
+    def load(cls, path: str | os.PathLike) -> Sample:
+        d = {}
+        with h5py.File(path, mode='r') as h5:
+            for k in cls._fields:
+                d[k] = np.asarray(h5[k])
+        return Sample(**d)
 
-        self.max_wav_value  = hparams.max_wav_value
-        self.sampling_rate  = hparams.sampling_rate
-        self.filter_length  = hparams.filter_length
-        self.hop_length     = hparams.hop_length
-        self.win_length     = hparams.win_length
-        self.sampling_rate  = hparams.sampling_rate
+    def save(self, path: str | os.PathLike) -> None:
+        with h5py.File(path, mode='w') as h5:
+            for k, v in self._asdict().items():
+                h5.create_dataset(k, data=v)
 
-        self.use_mel_spec_posterior = getattr(hparams, "use_mel_posterior_encoder", False)
-        if self.use_mel_spec_posterior:
-            self.n_mel_channels = getattr(hparams, "n_mel_channels", 80)
+    def numpy(self) -> Sample:
+        d = self._asdict()
+        for k, v in d.items():
+            d[k] = v.numpy() if isinstance(v, torch.Tensor) else v
+            assert isinstance(d[k], np.ndarray)
+        return Sample(**d)
 
-        self.add_blank = hparams.add_blank
-        self.min_text_len = getattr(hparams, "min_text_len", 1)
-        self.max_text_len = getattr(hparams, "max_text_len", 190)
+    def torch(self, device: str | torch.device | None = None) -> Sample:
+        d = self._asdict()
+        for k, v in d.items():
+            v = torch.from_numpy(v) if isinstance(v, np.ndarray) else v
+            assert isinstance(v, torch.Tensor)
+            # TODO: pin memory here?
+            d[k] = v.to(device, non_blocking=True)
+        return Sample(**d)
 
-        random.seed(1234)
-        random.shuffle(self.audiopaths_and_text)
-        self._filter()
 
-    def _filter(self) -> None:
-        """
-        Filter text & store spec lengths
-        """
-        # Store spectrogram lengths for Bucketing
+@jaxtyped
+class BatchPadded(NamedTuple):
+    feat: list[Sample]
+    text: Long[Tensor, 'B max_text_length']
+    text_length: Long[Tensor, ' B']
+    spec: SpecForm
+    spec_length: Long[Tensor, ' B']
+    wave: WaveForm
+    wave_length: Long[Tensor, ' B']
+
+
+class TTSDataset(torch.utils.data.Dataset):
+    """Dataset that samples (mel) spectrograms, waveforms and qfeatures."""
+
+    def __init__(
+        self,
+        config: FeaturesConfig,
+        feat_dir: str | os.PathLike,
+        wavs_dir: str | os.PathLike,
+        cache: bool = True,
+        seed: int | None = 1234,
+    ) -> None:
+        self._config = config
+        self._cache = cache
+        self._feat_dir = Path(feat_dir)
+        self._wavs_dir = Path(wavs_dir)
+        self._samples: list[tuple[Path, Path]] = []
+        self._lengths: list[int] = []
+
+        self._find_samples()
+        random.seed(seed)
+        random.shuffle(self._samples)
+        self._compute_lengths()
+
+    def _find_samples(self) -> None:
+        """Finds wavs and features paths with matching filennames."""
+
+        self._samples.clear()
+        wavs = sorted(self._wavs_dir.glob('*.wav'))
+        for wp in tqdm(wavs, desc=f'Indexing files in {self._wavs_dir}'):
+            fp = Path(self._feat_dir, wp.stem).with_suffix('.h5')
+            if not fp.exists():
+                tqdm.write(f'Skip, no features: {fp.stem}', sys.stderr)
+                continue
+            self._samples.append((wp, fp))
+
+    def _compute_lengths(self) -> None:
+        """Computes spectrogram lengths for bucketing."""
+
+        # store spectrogram lengths for Bucketing
         # wav_length ~= file_size / (wav_channels * Bytes per dim) = file_size / (1 * 2)
         # spec_length = wav_length // hop_length
 
-        audiopaths_and_text_new = []
-        lengths = []
-        for audiopath, text in self.audiopaths_and_text:
-            if self.min_text_len <= len(text) and len(text) <= self.max_text_len:
-                audiopaths_and_text_new.append([audiopath, text])
-                lengths.append(os.path.getsize(audiopath) // (2 * self.hop_length))
-        self.audiopaths_and_text = audiopaths_and_text_new
-        self.lengths = lengths
+        self._lengths.clear()
+        for wp, _ in tqdm(self._samples, desc='Calculating spec lengths'):
+            length = os.path.getsize(wp) // (2 * self._config.audio.hop_length)
+            self._lengths.append(length)
 
-    def get_audio_text_pair(self, sample: Utterance) -> tuple[torch.LongTensor, torch.Tensor, torch.Tensor]:
-        # separate filename and text
-        text = self.get_text(sample.text)
-        spec, wav = self.get_audio(sample.filename)
-        return (text, spec, wav)
+    @property
+    def lengths(self) -> list[int]:
+        return self._lengths
 
-    def get_audio(self, filename: str) -> tuple[torch.Tensor, torch.Tensor]:
-        audio, sampling_rate = readwav(filename)
-        # TODO: maybe resample then?
-        if sampling_rate != self.sampling_rate:
+    def get_feats(self, featpath: str | os.PathLike) -> Sample:
+        feat = Sample.load(featpath)
+        if self._config.text.add_blank:
+            feat = feat._replace(symbols=commons.intersperse(feat.symbols, 0))
+        return feat
+
+    def get_audio(self, wavpath: str | os.PathLike) -> tuple[SpecForm, WaveForm]:
+        wavpath = Path(wavpath)
+        config = self._config.audio
+
+        wave, sampling_rate = readwav(wavpath)
+        if sampling_rate != config.sampling_rate:
+            # TODO: maybe resample then?
             raise ValueError(f"{sampling_rate} SR doesn't match target {self.sampling_rate} SR")
-        audio = torch.from_numpy(audio)
-        audio_norm = audio / self.max_wav_value
-        audio_norm = audio_norm.unsqueeze(0)
-        spec_filename = filename.replace(".wav", ".spec.pt")
-        if self.use_mel_spec_posterior:
-            spec_filename = spec_filename.replace(".spec.pt", ".mel.pt")
-        if os.path.exists(spec_filename):
-            spec = torch.load(spec_filename)
+
+        wave = torch.from_numpy(wave)
+        wave = wave / MAX_WAV_VALUE
+        wave = wave.unsqueeze(0)
+
+        specpath = wavpath.with_suffix('.npy')
+        if specpath.exists():
+            debug(f'Cache hit: {specpath}')
+            spec = np.load(specpath)
+            return torch.from_numpy(spec), torch.squeeze(wave, 0)
+        if config.mel:
+            # TODO: if linear spec exists convert to mel from existing linear spec
+            spec = mel_spectrogram_torch(
+                wave,
+                n_fft=config.filter_length,
+                num_mels=config.mel.num_channels,
+                sampling_rate=config.sampling_rate,
+                hop_size=config.hop_length,
+                win_size=config.win_length,
+                fmin=config.mel.fmin,
+                fmax=config.mel.fmax,
+                center=False,
+            )
         else:
-            if self.use_mel_spec_posterior:
-                # TODO: need verification!
-                # if linear spec exists convert to mel from existing linear spec
-                # (uncomment below lines)
+            spec = spectrogram_torch(
+                wave,
+                n_fft=config.filter_length,
+                sampling_rate=config.sampling_rate,
+                hop_size=config.hop_length,
+                win_size=config.win_length,
+                center=False,
+            )
 
-                # if os.path.exists(filename.replace(".wav", ".spec.pt")):
-                #     # spec, n_fft, num_mels, sampling_rate, fmin, fmax
-                #     spec = spec_to_mel_torch(
-                #         torch.load(filename.replace(".wav", ".spec.pt")),
-                #         self.filter_length, self.n_mel_channels, self.sampling_rate,
-                #         self.hparams.mel_fmin, self.hparams.mel_fmax)
-                spec = mel_spectrogram_torch(
-                    audio_norm,
-                    self.filter_length,
-                    self.n_mel_channels,
-                    self.sampling_rate,
-                    self.hop_length,
-                    self.win_length,
-                    self.hparams.mel_fmin,
-                    self.hparams.mel_fmax,
-                    center=False,
-                )
-            else:
-                spec = spectrogram_torch(
-                    audio_norm,
-                    self.filter_length,
-                    self.sampling_rate,
-                    self.hop_length,
-                    self.win_length,
-                    center=False,
-                )
-            spec = torch.squeeze(spec, 0)
-            torch.save(spec, spec_filename)
-        return spec, audio_norm
+        spec = torch.squeeze(spec, 0)
+        wave = torch.squeeze(wave, 0)
+        if self._cache:
+            debug(f'Cached: {specpath}')
+            np.save(specpath, spec.numpy())
+        return spec, wave
 
-    def get_text(self, text: str) -> torch.LongTensor:
-        text_norm = encode_text(text)
-        if self.add_blank:
-            text_norm = commons.intersperse(text_norm, 0)
-        text_norm = torch.LongTensor(text_norm)
-        return text_norm
-
-    def __getitem__(self, index: int) -> tuple[torch.LongTensor, torch.Tensor, torch.Tensor]:
-        return self.get_audio_text_pair(self.samples[index])
+    def __getitem__(self, index: int) -> tuple[Sample, SpecForm, WaveForm]:
+        wp, fp = self._samples[index]
+        spec, wave = self.get_audio(wp)
+        feat = self.get_feats(fp)
+        return feat.torch(), spec, wave
 
     def __len__(self):
-        return len(self.samples)
+        return len(self._samples)
 
 
-class TextAudioCollate:
-    """Zero-pads model inputs and targets."""
+def collate_fn(batch: list[tuple[Sample, SpecForm, WaveForm]]) -> BatchPadded:
+    """Collates dataset features in tensors of equal length and a batch dimension."""
 
-    def __init__(self, return_ids=False):
-        self.return_ids = return_ids
+    feats, specs, waves = zip(*batch)
+    texts = tuple(f.symbols for f in feats)
 
-    def __call__(self, batch):
-        """Collate's training batch from normalized text and aduio
-        PARAMS
-        ------
-        batch: [text_normalized, spec_normalized, wav_normalized]
-        """
-        # Right zero-pad all one-hot text sequences to max input length
-        _, ids_sorted_decreasing = torch.sort(
-            torch.LongTensor([x[1].size(1) for x in batch]),
-            dim=0, descending=True)
+    text_padded = pad_sequence(texts, batch_first=True)
+    text_length = torch.as_tensor([t.size(0) for t in texts], dtype=torch.long)
 
-        max_text_len = max([len(x[0]) for x in batch])
-        max_spec_len = max([x[1].size(1) for x in batch])
-        max_wav_len = max([x[2].size(1) for x in batch])
+    spec_padded = pad_sequence([s.T for s in specs], batch_first=True).transpose(2, 1)
+    spec_length = torch.as_tensor([s.size(1) for s in specs], dtype=torch.long)
 
-        text_lengths = torch.LongTensor(len(batch))
-        spec_lengths = torch.LongTensor(len(batch))
-        wav_lengths = torch.LongTensor(len(batch))
+    wave_padded = pad_sequence(waves, batch_first=True)
+    wave_length = torch.as_tensor([w.size(0) for w in waves], dtype=torch.long)
 
-        text_padded = torch.LongTensor(len(batch), max_text_len)
-        spec_padded = torch.FloatTensor(len(batch), batch[0][1].size(0), max_spec_len)
-        wav_padded = torch.FloatTensor(len(batch), 1, max_wav_len)
-        text_padded.zero_()
-        spec_padded.zero_()
-        wav_padded.zero_()
-        for i in range(len(ids_sorted_decreasing)):
-            row = batch[ids_sorted_decreasing[i]]
+    indices = torch.argsort(spec_length, descending=True)
+    reorder = op.itemgetter(indices)
 
-            text = row[0]
-            text_padded[i, :text.size(0)] = text
-            text_lengths[i] = text.size(0)
-
-            spec = row[1]
-            spec_padded[i, :, :spec.size(1)] = spec
-            spec_lengths[i] = spec.size(1)
-
-            wav = row[2]
-            wav_padded[i, :, :wav.size(1)] = wav
-            wav_lengths[i] = wav.size(1)
-
-        if self.return_ids:
-            return text_padded, text_lengths, spec_padded, spec_lengths, wav_padded, wav_lengths, ids_sorted_decreasing
-        return text_padded, text_lengths, spec_padded, spec_lengths, wav_padded, wav_lengths
+    return BatchPadded(
+        feat=tuple(feats[i] for i in indices),
+        text=reorder(text_padded),
+        text_length=reorder(text_length),
+        spec=reorder(spec_padded),
+        spec_length=reorder(spec_length),
+        wave=reorder(wave_padded),
+        wave_length=reorder(wave_length),
+    )
 
 
 class DistributedBucketSampler(torch.utils.data.DistributedSampler):
-    """
-    Maintain similar input lengths in a batch.
+    """Maintains similar input lengths in a batch.
+
     Length groups are specified by boundaries.
-    Ex) boundaries = [b1, b2, b3] -> any batch is included either {x | b1 < length(x) <=b2} or {x | b2 < length(x) <= b3}.
+
+    For example:
+        boundaries = [b1, b2, b3] -> any batch is included either {x | b1 < length(x) <=b2} or {x | b2 < length(x) <= b3}.
 
     It removes samples which are not included in the boundaries.
-    Ex) boundaries = [b1, b2, b3] -> any x s.t. length(x) <= b1 or length(x) > b3 are discarded.
+    I.e. boundaries = [b1, b2, b3] -> any x s.t. length(x) <= b1 or length(x) > b3 are discarded.
     """
-    def __init__(self, dataset, batch_size, boundaries, num_replicas=None, rank=None, shuffle=True):
+
+    def __init__(
+        self,
+        dataset: torch.utils.data.Dataset,
+        batch_size: int,
+        lengths: Sequence[int],
+        boundaries: Sequence[int],
+        num_replicas: int | None = None,
+        rank: int | None = None,
+        shuffle: bool = True,
+    ) -> None:
         super().__init__(dataset, num_replicas=num_replicas, rank=rank, shuffle=shuffle)
-        self.lengths = dataset.lengths
+        self.lengths = lengths
         self.batch_size = batch_size
-        self.boundaries = boundaries # [32, 300, 400, 500, 600, 700, 800, 900, 1000]
+        self.boundaries = boundaries  # [32, 300, 400, 500, 600, 700, 800, 900, 1000]
 
         self.buckets, self.num_samples_per_bucket = self._create_buckets()
         self.total_size = sum(self.num_samples_per_bucket)
         self.num_samples = self.total_size // self.num_replicas
 
-    def _create_buckets(self):
-        buckets = [[] for _ in range(len(self.boundaries) - 1)]
+    def _create_buckets(self) -> tuple[list[int], list[int]]:
+        buckets: list[int] = [[] for _ in range(len(self.boundaries) - 1)]
         for i in range(len(self.lengths)):
             length = self.lengths[i]
             idx_bucket = self._bisect(length)
@@ -217,9 +279,9 @@ class DistributedBucketSampler(torch.utils.data.DistributedSampler):
         for i in range(len(buckets) - 1, 0, -1):
             if len(buckets[i]) == 0:
                 buckets.pop(i)
-                self.boundaries.pop(i+1)
+                self.boundaries.pop(i + 1)
 
-        num_samples_per_bucket = []
+        num_samples_per_bucket: list[int] = []
         for i in range(len(buckets)):
             len_bucket = len(buckets[i])
             total_batch_size = self.num_replicas * self.batch_size
@@ -228,64 +290,67 @@ class DistributedBucketSampler(torch.utils.data.DistributedSampler):
         return buckets, num_samples_per_bucket
 
     def __iter__(self):
-      # deterministically shuffle based on epoch
-      g = torch.Generator()
-      g.manual_seed(self.epoch)
+        # deterministically shuffle based on epoch
+        g = torch.Generator()
+        g.manual_seed(self.epoch)
 
-      indices = []
-      if self.shuffle:
-          for bucket in self.buckets:
-              indices.append(torch.randperm(len(bucket), generator=g).tolist())
-      else:
-          for bucket in self.buckets:
-              indices.append(list(range(len(bucket))))
+        indices = []
+        if self.shuffle:
+            for bucket in self.buckets:
+                indices.append(torch.randperm(len(bucket), generator=g).tolist())
+        else:
+            for bucket in self.buckets:
+                indices.append(list(range(len(bucket))))
 
-      batches = []
-      for i in range(len(self.buckets)):
-          bucket = self.buckets[i]
-          len_bucket = len(bucket)
-          ids_bucket = indices[i]
-          num_samples_bucket = self.num_samples_per_bucket[i]
+        batches = []
+        for i in range(len(self.buckets)):
+            bucket = self.buckets[i]
+            len_bucket = len(bucket)
+            ids_bucket = indices[i]
+            num_samples_bucket = self.num_samples_per_bucket[i]
 
-          # add extra samples to make it evenly divisible
-          rem = num_samples_bucket - len_bucket
-          ids_bucket = ids_bucket + ids_bucket * (rem // len_bucket) + ids_bucket[:(rem % len_bucket)]
-          '''
-          if len_bucket > 0: #- fix for  https://github.com/FENRlR/MB-iSTFT-VITS2/issues/9
-              rem = num_samples_bucket - len_bucket
-              ids_bucket = ids_bucket + ids_bucket * (rem // len_bucket) + ids_bucket[:(rem % len_bucket)]
-          '''
+            # add extra samples to make it evenly divisible
+            rem = num_samples_bucket - len_bucket
+            ids_bucket = (
+                ids_bucket + ids_bucket * (rem // len_bucket) + ids_bucket[: (rem % len_bucket)]
+            )
+            """
+            if len_bucket > 0: #- fix for  https://github.com/FENRlR/MB-iSTFT-VITS2/issues/9
+                rem = num_samples_bucket - len_bucket
+                ids_bucket = ids_bucket + ids_bucket * (rem // len_bucket) + ids_bucket[:(rem % len_bucket)]
+            """
 
-          # subsample
-          ids_bucket = ids_bucket[self.rank::self.num_replicas]
+            # subsample
+            ids_bucket = ids_bucket[self.rank :: self.num_replicas]
 
-          # batching
-          for j in range(len(ids_bucket) // self.batch_size):
-              batch = [bucket[idx] for idx in ids_bucket[j*self.batch_size:(j+1)*self.batch_size]]
-              batches.append(batch)
+            # batching
+            for j in range(len(ids_bucket) // self.batch_size):
+                batch = [
+                    bucket[idx]
+                    for idx in ids_bucket[j * self.batch_size : (j + 1) * self.batch_size]
+                ]
+                batches.append(batch)
 
-      if self.shuffle:
-          batch_ids = torch.randperm(len(batches), generator=g).tolist()
-          batches = [batches[i] for i in batch_ids]
-      self.batches = batches
+        if self.shuffle:
+            batch_ids = torch.randperm(len(batches), generator=g).tolist()
+            batches = [batches[i] for i in batch_ids]
+        self.batches = batches
 
-      assert len(self.batches) * self.batch_size == self.num_samples
-      return iter(self.batches)
+        assert len(self.batches) * self.batch_size == self.num_samples
+        return iter(self.batches)
 
-    def _bisect(self, x, lo=0, hi=None):
-      if hi is None:
-          hi = len(self.boundaries) - 1
+    def _bisect(self, x, lo=0, hi=None) -> int:
+        if hi is None:
+            hi = len(self.boundaries) - 1
+        if hi > lo:
+            mid = (hi + lo) // 2
+            if self.boundaries[mid] < x and x <= self.boundaries[mid + 1]:
+                return mid
+            elif x <= self.boundaries[mid]:
+                return self._bisect(x, lo, mid)
+            else:
+                return self._bisect(x, mid + 1, hi)
+        return -1
 
-      if hi > lo:
-          mid = (hi + lo) // 2
-          if self.boundaries[mid] < x and x <= self.boundaries[mid+1]:
-              return mid
-          elif x <= self.boundaries[mid]:
-              return self._bisect(x, lo, mid)
-          else:
-              return self._bisect(x, mid + 1, hi)
-      else:
-          return -1
-
-    def __len__(self):
+    def __len__(self) -> int:
         return self.num_samples // self.batch_size

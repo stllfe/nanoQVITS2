@@ -8,17 +8,15 @@ import sys
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Iterable, NamedTuple
+from typing import Iterable
 
 
 sys.path.append(os.path.dirname(__file__))
 
-import h5py
 import numpy as np
 import requests
 import tyro
 
-from numpy.typing import NDArray
 from textgrid import TextGrid
 from tqdm import tqdm
 
@@ -26,6 +24,7 @@ from utils import bert
 from utils.audio import normalize
 from utils.audio import readwav
 from utils.audio import writewav
+from utils.data import Sample
 from utils.data import Utterance
 from utils.qfeatures import Word
 from utils.qfeatures import compute_word_features
@@ -34,6 +33,9 @@ from utils.qfeatures import quantize_features
 from utils.text import clean
 from utils.text import encode_text
 
+
+TEXT_MIN_LENGTH = 1
+TEXT_MAX_LENGTH = 250
 
 NUM_WORKERS = (os.cpu_count() or 1) // 2
 
@@ -146,7 +148,7 @@ def process() -> None:
             words.extend(w)
             pbar.update(1)
 
-    ut2ws = defaultdict(list)
+    ut2ws: dict[Utterance, list[Word]] = defaultdict(list)
     with tqdm(desc='Compiling quantized features', total=len(words)) as pbar:
         for ut, w in zip(uttrs, quantize_features(words)):
             ut2ws[ut].append(w)
@@ -157,8 +159,12 @@ def process() -> None:
     for ut, ws in tqdm(ut2ws.items(), total=len(ut2ws), desc='Writing files to disk'):
         ws.sort(key=lambda word: word.index)
         tokembs, tokspan = bert.embed(ut.text, model, tokenizer)
-        q = QSample(
-            symbols=np.asarray(encode_text(ut.text), dtype=np.uint8),
+        symbols = encode_text(ut.text)
+        if TEXT_MIN_LENGTH > len(symbols) > TEXT_MAX_LENGTH:
+            tqdm.write(f'Skip due to text length: {ut.filename}', sys.stderr)
+            continue
+        q = Sample(
+            symbols=np.asarray(symbols, dtype=np.uint8),
             tokembs=tokembs,
             tokspan=tokspan,
             wrdspan=compute_word_spans(ut.text, ws),
@@ -176,27 +182,6 @@ def process_utterance(uttr: Utterance) -> tuple[Utterance, list[Word]]:
     words = compute_word_features(audio, alignment, rate=rate, min_duration=0.01)
 
     return uttr, list(words)
-
-
-class QSample(NamedTuple):
-    symbols: NDArray
-    tokembs: NDArray
-    tokspan: NDArray
-    wrdspan: NDArray
-    qfeatures: NDArray
-
-    @classmethod
-    def load(cls, path: str | os.PathLike) -> QSample:
-        d = {}
-        with h5py.File(path, mode='r') as h5:
-            for k in cls._fields:
-                d[k] = np.asarray(h5[k])
-        return QSample(**d)
-
-    def save(self, path: str | os.PathLike) -> None:
-        with h5py.File(path, mode='w') as h5:
-            for k, v in self._asdict().items():
-                h5.create_dataset(k, data=v)
 
 
 if __name__ == '__main__':

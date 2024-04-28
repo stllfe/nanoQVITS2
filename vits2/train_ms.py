@@ -34,7 +34,7 @@ from vits2.losses import (
     subband_stft_loss
 )
 from vits2.mel_processing import mel_spectrogram_torch, spec_to_mel_torch
-from utils.text import symbols
+from utils.text import SYMBOLS
 
 torch.autograd.set_detect_anomaly(True)
 torch.backends.cudnn.benchmark = True
@@ -168,7 +168,7 @@ def run(rank, n_gpus, hps):
         use_duration_discriminator = False
 
     net_g = SynthesizerTrn(
-        len(symbols),
+        len(SYMBOLS),
         posterior_channels,
         hps.train.segment_size // hps.data.hop_length,
         n_speakers=hps.data.n_speakers,

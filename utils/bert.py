@@ -10,7 +10,6 @@ from transformers import AutoTokenizer
 from transformers import PreTrainedModel
 from transformers import PreTrainedTokenizer
 
-
 # this may be not the best model for the given task, check this later:
 # https://github.com/avidale/encodechka
 MODEL = 'cointegrated/rubert-tiny2'
