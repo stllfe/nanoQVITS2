@@ -7,6 +7,7 @@ from numpy.typing import NDArray
 from scipy import stats
 from scipy.io import wavfile
 
+
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='scipy.stats')
 
 

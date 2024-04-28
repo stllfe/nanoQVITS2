@@ -29,6 +29,7 @@ from vits2 import commons
 from vits2.mel_processing import mel_spectrogram_torch
 from vits2.mel_processing import spectrogram_torch
 
+
 jaxtyped = jaxtyped(typechecker=beartype)
 
 Array = TypeVar('Array', Tensor, NDArray)

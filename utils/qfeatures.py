@@ -14,7 +14,7 @@ from textgrid import TextGrid
 
 from utils.audio import compute_pitch
 from utils.audio import compute_pitch_slope
-from utils.helpers import DEBUG
+from utils.helpers import debug
 
 
 PAD_FEATURE = 0
@@ -92,16 +92,13 @@ def quantize_features(words: Iterable[Word], bins: int = 5) -> Iterable[Word]:
 
     feats = np.array([w.feats for w in words])
     for j in range(feats.shape[1]):
-        if DEBUG:
-            print(f'Feature: {j}')
+        debug(f'Feature: {j}', level=2)
         # todo: mean imputation maybe not the best idea though
         mean = np.nanmean(feats[:, j]).item()
-        if DEBUG:
-            print(f'Filling NaNs with {mean=:.4f}')
+        debug(f'Filling NaNs with {mean=:.4f}', level=2)
         np.nan_to_num(feats[:, j], nan=mean, copy=False)
         _, edges = np.histogram(feats[:, j], bins=bins)
-        if DEBUG:
-            print(f'Edges: {edges}\n')
+        debug(f'Edges: {edges}\n', level=2)
         feats[:, j] = np.digitize(feats[:, j], bins=edges, right=True)
     feats = feats.astype(np.uint8)
     for i, w in enumerate(words):
@@ -146,16 +143,3 @@ def printchr(text: str, words: Iterable[Word], spans: NDArray | None = None) -> 
     print(text)
     for line in features.T:
         print(''.join(map(str, line)))
-
-
-# if __name__ == '__main__':
-#     text = 'ah, shit! here we go again...'
-#     words = [
-#         Word(text='ah', index=0, start=0, end=1, feats=WordFeatures(volume=1, speed=1, pitch_mean=1, pitch_fslope=1, pitch_lslope=1, pitch_rslope=2)),
-#         Word(text='shit', index=1, start=0, end=1, feats=WordFeatures(volume=2, speed=2, pitch_mean=2, pitch_fslope=2, pitch_lslope=2, pitch_rslope=3)),
-#         Word(text='here', index=1, start=0, end=1, feats=WordFeatures(volume=3, speed=3, pitch_mean=3, pitch_fslope=3, pitch_lslope=3, pitch_rslope=4)),
-#         Word(text='we', index=1, start=0, end=1, feats=WordFeatures(volume=4, speed=4, pitch_mean=4, pitch_fslope=4, pitch_lslope=4, pitch_rslope=5)),
-#         Word(text='go', index=1, start=0, end=1, feats=WordFeatures(volume=5, speed=5, pitch_mean=5, pitch_fslope=5, pitch_lslope=5, pitch_rslope=6))
-#     ]
-#     print(compute_word_spans(text, words))
-#     printchr(text, words)

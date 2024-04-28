@@ -35,6 +35,5 @@ DEBUG = ContextVar('DEBUG', 0)
 
 
 def debug(*args, level: int = 1, rank: int | None = None) -> None:
-    if DEBUG < level:
-        return
-    print(*args)
+    if DEBUG >= level:
+        print(*args)
