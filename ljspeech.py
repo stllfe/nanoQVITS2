@@ -174,18 +174,18 @@ def process() -> None:
         feat.save(Path(FEAT_DIR, ut.filename).with_suffix('.h5'))
 
 
-def process_utterance(uttr: Utterance) -> tuple[Utterance, list[Word]]:
-    wavpath = Path(WAVS_DIR, uttr.filename).with_suffix('.wav')
-    mfapath = Path(MFAS_DIR, uttr.filename).with_suffix('.TextGrid')
+def process_utterance(ut: Utterance) -> tuple[Utterance, list[Word]]:
+    wavpath = Path(WAVS_DIR, ut.filename).with_suffix('.wav')
+    mfapath = Path(MFAS_DIR, ut.filename).with_suffix('.TextGrid')
 
     audio, rate = readwav(wavpath)
     alignment = TextGrid.fromFile(mfapath)
     words = compute_word_features(audio, alignment, rate=rate, min_duration=0.01)
 
-    return uttr, list(words)
+    return ut, list(words)
 
 
-def split(seed: int = 25512, num_test: int = 500, num_valid: int = 100) -> None:
+def split(num_test: int = 500, num_valid: int = 100, seed: int = 25512) -> None:
     """Compiles train, valid, test file lists for the processed dataset."""
 
     def isready(ut: Utterance) -> bool:
@@ -199,7 +199,7 @@ def split(seed: int = 25512, num_test: int = 500, num_valid: int = 100) -> None:
     random.seed(seed)
     test = random.choices(indices, k=num_test)
     valid = random.choices(indices[indices != test], k=num_valid)
-    train = indices[~np.isin(indices, test) & ~np.isin(indices, valid)]
+    train = indices[~np.isin(indices, np.concatenate((test, valid)))]
 
     for name, ix in (('test', test), ('valid', valid), ('train', train)):
         lp = Path(DATA_DIR, DIR, name).with_suffix('.list')
