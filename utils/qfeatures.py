@@ -123,7 +123,7 @@ def compute_word_spans(text: str, words: Iterable[Word]) -> NDArray:
             word = next(words, None)
         else:
             i += 1
-    return np.array(spans)
+    return np.array(spans, dtype=np.uint32)
 
 
 def printchr(text: str, words: Iterable[Word], spans: NDArray | None = None) -> None:

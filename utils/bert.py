@@ -2,6 +2,7 @@
 
 from functools import cache
 
+import numpy as np
 import torch
 
 from numpy.typing import NDArray
@@ -48,4 +49,4 @@ def embed(
 
     embeddings = model(**data)[0]
     embeddings = embeddings.detach().cpu().numpy()
-    return embeddings, spans.numpy()
+    return embeddings, spans.numpy().astype(np.uint32)

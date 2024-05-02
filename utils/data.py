@@ -62,8 +62,9 @@ class Features(NamedTuple):
         return Features(**d)
 
     def save(self, path: str | os.PathLike) -> None:
+        x = self.numpy()
         with h5py.File(path, mode='w') as h5:
-            for k, v in self._asdict().items():
+            for k, v in x._asdict().items():
                 h5.create_dataset(k, data=v)
 
     def numpy(self) -> Features:
@@ -100,6 +101,7 @@ class TTSDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         config: FeaturesConfig,
+        filenames: Sequence[str],
         feat_dir: str | os.PathLike,
         wavs_dir: str | os.PathLike,
         cache: bool = True,
@@ -109,6 +111,7 @@ class TTSDataset(torch.utils.data.Dataset):
         self._cache = cache
         self._feat_dir = Path(feat_dir)
         self._wavs_dir = Path(wavs_dir)
+        self._filenames = filenames
         self._samples: list[tuple[Path, Path]] = []
         self._lengths: list[int] = []
 
@@ -121,13 +124,17 @@ class TTSDataset(torch.utils.data.Dataset):
         """Finds wavs and features paths with matching filennames."""
 
         self._samples.clear()
-        wavs = sorted(self._wavs_dir.glob('*.wav'))
-        for wp in tqdm(wavs, desc=f'Indexing files in {self._wavs_dir}'):
-            fp = Path(self._feat_dir, wp.stem).with_suffix('.h5')
+        for filename in tqdm(self._filenames, desc='Looking for files'):
+            wp = Path(self._wavs_dir, filename).with_suffix('.wav')
+            fp = Path(self._feat_dir, filename).with_suffix('.h5')
+            if not wp.exists():
+                tqdm.write(f'Skip, no audio: {filename}', sys.stderr)
+                continue
             if not fp.exists():
-                tqdm.write(f'Skip, no features: {fp.stem}', sys.stderr)
+                tqdm.write(f'Skip, no features: {filename}', sys.stderr)
                 continue
             self._samples.append((wp, fp))
+        assert self._samples, 'No samples found!'
 
     def _compute_lengths(self) -> None:
         """Computes spectrogram lengths for bucketing."""
@@ -209,6 +216,7 @@ class TTSDataset(torch.utils.data.Dataset):
         return len(self._samples)
 
 
+@jaxtyped
 def collate_fn(batch: list[tuple[Features, SpecForm, WaveForm]]) -> BatchPadded:
     """Collates dataset features in tensors of equal length and a batch dimension."""
 

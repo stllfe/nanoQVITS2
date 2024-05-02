@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import random
 import sys
 
 from collections import defaultdict
@@ -118,7 +119,7 @@ def download() -> None:
     print('Download complete.')
 
 
-def prepare(dst: str | None = None) -> None:
+def prepare() -> None:
     """Prepares all the necessary files for alignment."""
 
     wavs_dir = Path(DATA_DIR, DIR, 'wavs')
@@ -177,11 +178,43 @@ def process_utterance(uttr: Utterance) -> tuple[Utterance, list[Word]]:
     wavpath = Path(WAVS_DIR, uttr.filename).with_suffix('.wav')
     mfapath = Path(MFAS_DIR, uttr.filename).with_suffix('.TextGrid')
 
-    audio, rate = readwav(wavpath.as_posix())
-    alignment = TextGrid.fromFile(mfapath.as_posix())
+    audio, rate = readwav(wavpath)
+    alignment = TextGrid.fromFile(mfapath)
     words = compute_word_features(audio, alignment, rate=rate, min_duration=0.01)
 
     return uttr, list(words)
+
+
+def split(seed: int = 25512, num_test: int = 500, num_valid: int = 100) -> None:
+    """Compiles train, valid, test file lists for the processed dataset."""
+
+    def isready(ut: Utterance) -> bool:
+        wp = Path(WAVS_DIR, ut.filename).with_suffix('.wav')
+        fp = Path(FEAT_DIR, ut.filename).with_suffix('.h5')
+        return wp.exists() and fp.exists()
+
+    uttrs = sorted(filter(isready, load_from_prepared()))
+    indices = np.arange(len(uttrs))
+
+    random.seed(seed)
+    test = random.choices(indices, k=num_test)
+    valid = random.choices(indices[indices != test], k=num_valid)
+    train = indices[~np.isin(indices, test) & ~np.isin(indices, valid)]
+
+    for name, ix in (('test', test), ('valid', valid), ('train', train)):
+        lp = Path(DATA_DIR, DIR, name).with_suffix('.list')
+        with open(lp, mode='w', encoding='utf-8') as fd:
+            for i in ix:
+                fd.write(uttrs[i].filename + '\n')
+
+
+def main() -> None:
+    """Runs the whole LJSpeech preprocessing pipeline end-to-end."""
+
+    download()
+    prepare()
+    process()
+    split()
 
 
 if __name__ == '__main__':
@@ -191,5 +224,7 @@ if __name__ == '__main__':
             'download': download,
             'prepare': prepare,
             'process': process,
+            'split': split,
+            'all': main,
         },
     )
