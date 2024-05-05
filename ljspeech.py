@@ -194,17 +194,19 @@ def split(num_test: int = 500, num_valid: int = 100, seed: int = 25512) -> None:
         return wp.exists() and fp.exists()
 
     uttrs = sorted(filter(isready, load_from_prepared()))
-    indices = np.arange(len(uttrs))
+    index = range(len(uttrs))
 
     random.seed(seed)
-    test = random.choices(indices, k=num_test)
-    valid = random.choices(indices[indices != test], k=num_valid)
-    train = indices[~np.isin(indices, np.concatenate((test, valid)))]
+    test = random.sample(index, k=num_test)
+    left = set(index) - set(test)
 
-    for name, ix in (('test', test), ('valid', valid), ('train', train)):
-        filepath = Path(DATA_DIR, DIR, name).with_suffix('.list')
+    valid = random.sample(sorted(left), k=num_valid)
+    train = sorted(left - set(valid))
+
+    for subset, indices in (('test', test), ('valid', valid), ('train', train)):
+        filepath = Path(DATA_DIR, DIR, subset).with_suffix('.list')
         with open(filepath, mode='w', encoding='utf-8') as file:
-            for i in ix:
+            for i in indices:
                 file.write(uttrs[i].filename + '\n')
 
 
