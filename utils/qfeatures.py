@@ -64,7 +64,7 @@ def compute_word_features(
         t0, t1, word = interval.minTime, interval.maxTime, interval.mark
         dt = t1 - t0
 
-        if dt < min_duration or not word:
+        if not word or isspecial(word) or dt < min_duration:
             continue
 
         f0w = f0[(times >= t0) & (times <= t1)]
@@ -78,7 +78,7 @@ def compute_word_features(
             end=t1,
             feats=WordFeatures(
                 volume=np.std(chunk).item(),
-                speed=len(word) / dt if not isspecial(word) else np.nan,
+                speed=len(word) / dt,
                 pitch_mean=np.mean(f0w).item(),
                 pitch_fslope=compute_pitch_slope(f0w),
                 pitch_lslope=compute_pitch_slope(f0w[:mid]),

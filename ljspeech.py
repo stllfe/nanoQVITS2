@@ -22,9 +22,7 @@ from textgrid import TextGrid
 from tqdm import tqdm
 
 from utils import bert
-from utils.audio import normalize
 from utils.audio import readwav
-from utils.audio import writewav
 from utils.data import Features
 from utils.data import Utterance
 from utils.qfeatures import Word
@@ -64,11 +62,11 @@ def download_file(url: str, fname: str, chunk_size: int = 1024) -> None:
             unit='iB',
             unit_scale=True,
             unit_divisor=1024,
-        ) as bar,
+        ) as pbar,
     ):
         for data in response.iter_content(chunk_size=chunk_size):
             size = file.write(data)
-            bar.update(size)
+            pbar.update(size)
 
 
 def load_from_metadata(filename: str = 'metadata.csv') -> Iterable[Utterance]:
@@ -127,12 +125,10 @@ def prepare() -> None:
     for ut in tqdm(load_from_metadata(), desc='Preparing samples'):
         wavpath = Path(wavs_dir, ut.filename).with_suffix('.wav')
         try:
-            wav, sr = readwav(wavpath)
+            readwav(wavpath)
         except FileNotFoundError:
             tqdm.write(f'Not found: {wavpath}', sys.stderr)
             continue
-        writewav(normalize(wav), sr, wavpath)
-
         labpath = Path(wavs_dir, ut.filename).with_suffix('.lab')
         with open(labpath, mode='w', encoding='utf-8') as file:
             file.write(clean(ut.text) + '\n')
@@ -143,8 +139,12 @@ def process() -> None:
 
     words: list[Word] = []
     uttrs: list[Utterance] = []
-    with mp.Pool(processes=NUM_WORKERS) as pool, tqdm(desc='Processing utterances') as pbar:
-        for ut, w in pool.imap_unordered(process_utterance, load_from_prepared()):
+    origs: list[Utterance] = list(load_from_prepared())
+    with (
+        mp.Pool(processes=NUM_WORKERS) as pool,
+        tqdm(desc='Processing utterances', total=len(origs)) as pbar,
+    ):
+        for ut, w in pool.imap_unordered(process_utterance, origs):
             uttrs.extend([ut] * len(w))
             words.extend(w)
             pbar.update(1)
@@ -202,19 +202,10 @@ def split(num_test: int = 500, num_valid: int = 100, seed: int = 25512) -> None:
     train = indices[~np.isin(indices, np.concatenate((test, valid)))]
 
     for name, ix in (('test', test), ('valid', valid), ('train', train)):
-        lp = Path(DATA_DIR, DIR, name).with_suffix('.list')
-        with open(lp, mode='w', encoding='utf-8') as fd:
+        filepath = Path(DATA_DIR, DIR, name).with_suffix('.list')
+        with open(filepath, mode='w', encoding='utf-8') as file:
             for i in ix:
-                fd.write(uttrs[i].filename + '\n')
-
-
-def main() -> None:
-    """Runs the whole LJSpeech preprocessing pipeline end-to-end."""
-
-    download()
-    prepare()
-    process()
-    split()
+                file.write(uttrs[i].filename + '\n')
 
 
 if __name__ == '__main__':
@@ -225,6 +216,5 @@ if __name__ == '__main__':
             'prepare': prepare,
             'process': process,
             'split': split,
-            'all': main,
         },
     )

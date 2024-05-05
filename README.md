@@ -17,8 +17,7 @@ mfa model download dictionary english_mfa
 ```
 
 ```shell
-mfa align \
--j 8 \
+mfa align -j 8 \
 --use_mp \
 --clean \
 --single_speaker \
