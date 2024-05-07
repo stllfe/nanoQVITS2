@@ -42,11 +42,12 @@ PROJ_DIR = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.path.join(PROJ_DIR, 'data')
 
 URL = 'https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2'
-DIR = 'LJSpeech-1.1'
+DIRNAME = 'LJSpeech-1.1'
 
-WAVS_DIR = os.path.join(DATA_DIR, DIR, 'wavs')
-MFAS_DIR = os.path.join(DATA_DIR, DIR, 'alignment')
-FEAT_DIR = os.path.join(DATA_DIR, DIR, 'features')
+ROOT_DIR = os.path.join(DATA_DIR, DIRNAME)
+WAVS_DIR = os.path.join(ROOT_DIR, 'wavs')
+MFAS_DIR = os.path.join(ROOT_DIR, 'alignment')
+FEAT_DIR = os.path.join(ROOT_DIR, 'features')
 
 
 def download_file(url: str, fname: str, chunk_size: int = 1024) -> None:
@@ -72,7 +73,7 @@ def download_file(url: str, fname: str, chunk_size: int = 1024) -> None:
 def load_from_metadata(filename: str = 'metadata.csv') -> Iterable[Utterance]:
     """Loads dataset samples lazily."""
 
-    filepath = os.path.join(DATA_DIR, DIR, filename)
+    filepath = os.path.join(ROOT_DIR, filename)
     with open(filepath, mode='r', encoding='utf-8') as file:
         for line in file:
             name, _, text = line.split('|')
@@ -82,7 +83,7 @@ def load_from_metadata(filename: str = 'metadata.csv') -> Iterable[Utterance]:
 def load_from_prepared() -> Iterable[Utterance]:
     """Loads dataset samples from disk."""
 
-    wavs_dir = Path(DATA_DIR, DIR, 'wavs')
+    wavs_dir = Path(ROOT_DIR, 'wavs')
     for p in wavs_dir.glob('*.lab'):
         with open(p, mode='r', encoding='utf-8') as file:
             text = file.readline()
@@ -103,7 +104,7 @@ def download() -> None:
         print(f'{filename} already exists, skipping download...')
 
     # unpack the tar.bz2 file into ljspeech directory
-    data_dir = os.path.join(DATA_DIR, DIR)
+    data_dir = os.path.join(DATA_DIR, DIRNAME)
 
     # TODO: can we skip it and do the prepare step from the compressed tar,
     # just by sequentially reading it?
@@ -120,16 +121,14 @@ def download() -> None:
 def prepare() -> None:
     """Prepares all the necessary files for alignment."""
 
-    wavs_dir = Path(DATA_DIR, DIR, 'wavs')
-
     for ut in tqdm(load_from_metadata(), desc='Preparing samples'):
-        wavpath = Path(wavs_dir, ut.filename).with_suffix('.wav')
+        wavpath = Path(WAVS_DIR, ut.filename).with_suffix('.wav')
         try:
             readwav(wavpath)
         except FileNotFoundError:
             tqdm.write(f'Not found: {wavpath}', sys.stderr)
             continue
-        labpath = Path(wavs_dir, ut.filename).with_suffix('.lab')
+        labpath = Path(WAVS_DIR, ut.filename).with_suffix('.lab')
         with open(labpath, mode='w', encoding='utf-8') as file:
             file.write(clean(ut.text) + '\n')
 
@@ -139,12 +138,13 @@ def process() -> None:
 
     words: list[Word] = []
     uttrs: list[Utterance] = []
-    origs: list[Utterance] = list(load_from_prepared())
+
+    buff: list[Utterance] = list(load_from_prepared())
     with (
         mp.Pool(processes=NUM_WORKERS) as pool,
-        tqdm(desc='Processing utterances', total=len(origs)) as pbar,
+        tqdm(desc='Processing utterances', total=len(buff)) as pbar,
     ):
-        for ut, w in pool.imap_unordered(process_utterance, origs):
+        for ut, w in pool.imap_unordered(process_utterance, buff):
             uttrs.extend([ut] * len(w))
             words.extend(w)
             pbar.update(1)
@@ -204,7 +204,7 @@ def split(num_test: int = 500, num_valid: int = 100, seed: int = 25512) -> None:
     train = sorted(left - set(valid))
 
     for subset, indices in (('test', test), ('valid', valid), ('train', train)):
-        filepath = Path(DATA_DIR, DIR, subset).with_suffix('.list')
+        filepath = Path(ROOT_DIR, subset).with_suffix('.list')
         with open(filepath, mode='w', encoding='utf-8') as file:
             for i in indices:
                 file.write(uttrs[i].filename + '\n')

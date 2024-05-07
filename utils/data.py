@@ -21,7 +21,8 @@ from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 
-from config import FeaturesConfig
+from config import AudioConfig
+from config import TextConfig
 from utils.audio import MAX_WAV_VALUE
 from utils.audio import readwav
 from utils.helpers import debug
@@ -95,19 +96,32 @@ class BatchPadded(NamedTuple):
     wave_length: Long[Tensor, ' B']
 
 
+def load_filename_list(list_path: str | os.PathLike) -> list[str]:
+    filenames: list[str] = []
+    with open(list_path, encoding='utf-8', mode='r') as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            filenames.append(line)
+    return filenames
+
+
 class TTSDataset(torch.utils.data.Dataset):
     """Dataset that samples (mel) spectrograms, waveforms and qfeatures."""
 
     def __init__(
         self,
-        config: FeaturesConfig,
+        audio_config: AudioConfig,
+        text_config: TextConfig | None,
         filenames: Sequence[str],
         feat_dir: str | os.PathLike,
         wavs_dir: str | os.PathLike,
         cache: bool = True,
         seed: int | None = 1234,
     ) -> None:
-        self._config = config
+        self._audio_config = audio_config
+        self._text_config = text_config
         self._cache = cache
         self._feat_dir = Path(feat_dir)
         self._wavs_dir = Path(wavs_dir)
@@ -145,7 +159,7 @@ class TTSDataset(torch.utils.data.Dataset):
 
         self._lengths.clear()
         for wp, _ in tqdm(self._samples, desc='Calculating spec lengths'):
-            length = os.path.getsize(wp) // (2 * self._config.audio.hop_length)
+            length = os.path.getsize(wp) // (2 * self._audio_config.audio.hop_length)
             self._lengths.append(length)
 
     @property
@@ -154,16 +168,15 @@ class TTSDataset(torch.utils.data.Dataset):
 
     def get_feats(self, featpath: str | os.PathLike) -> Features:
         feat = Features.load(featpath)
-        if self._config.text.add_blank:
+        if self._text_config and self._text_config.add_blank:
             feat = feat._replace(symbols=commons.intersperse(feat.symbols, 0))
         return feat
 
     def get_audio(self, wavpath: str | os.PathLike) -> tuple[SpecForm, WaveForm]:
         wavpath = Path(wavpath)
-        config = self._config.audio
 
         wave, sampling_rate = readwav(wavpath)
-        if sampling_rate != config.sampling_rate:
+        if sampling_rate != self._audio_config.sampling_rate:
             # TODO: maybe resample then?
             raise ValueError(f"{sampling_rate} SR doesn't match target {self.sampling_rate} SR")
 
@@ -176,26 +189,26 @@ class TTSDataset(torch.utils.data.Dataset):
             debug(f'Cache hit: {specpath}')
             spec = np.load(specpath)
             return torch.from_numpy(spec), torch.squeeze(wave, 0)
-        if config.mel:
+        if self._audio_config.mel:
             # TODO: if linear spec exists convert to mel from existing linear spec
             spec = mel_spectrogram_torch(
                 wave,
-                n_fft=config.filter_length,
-                num_mels=config.mel.num_channels,
-                sampling_rate=config.sampling_rate,
-                hop_size=config.hop_length,
-                win_size=config.win_length,
-                fmin=config.mel.fmin,
-                fmax=config.mel.fmax,
+                n_fft=self._audio_config.filter_length,
+                num_mels=self._audio_config.mel.num_channels,
+                sampling_rate=self._audio_config.sampling_rate,
+                hop_size=self._audio_config.hop_length,
+                win_size=self._audio_config.win_length,
+                fmin=self._audio_config.mel.fmin,
+                fmax=self._audio_config.mel.fmax,
                 center=False,
             )
         else:
             spec = spectrogram_torch(
                 wave,
-                n_fft=config.filter_length,
-                sampling_rate=config.sampling_rate,
-                hop_size=config.hop_length,
-                win_size=config.win_length,
+                n_fft=self._audio_config.filter_length,
+                sampling_rate=self._audio_config.sampling_rate,
+                hop_size=self._audio_config.hop_length,
+                win_size=self._audio_config.win_length,
                 center=False,
             )
 
