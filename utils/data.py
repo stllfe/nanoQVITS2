@@ -36,17 +36,15 @@ jaxtyped = jaxtyped(typechecker=beartype)
 Array = TypeVar('Array', Tensor, NDArray)
 
 Long = Int64
-WaveForm = Float[Tensor, '*B wave_samples']
-SpecForm = Float[Tensor, '*B spec_samples']
+WaveForm = Float[Tensor, '*B 1 wave_samples']
+SpecForm = Float[Tensor, '*B num_channels spec_samples']
 
 
-@beartype
 class Utterance(NamedTuple):
     filename: str
     text: str
 
 
-@jaxtyped
 class Features(NamedTuple):
     symbols: UInt8[Array, '*B text_length']
     tokembs: Float[Array, '*B num_tokens']
@@ -78,6 +76,7 @@ class Features(NamedTuple):
     def torch(self, device: str | torch.device | None = None) -> Features:
         d = self._asdict()
         for k, v in d.items():
+            v = v.astype(np.int32) if v.dtype in (np.uint32, np.uint8) else v
             v = torch.from_numpy(v) if isinstance(v, np.ndarray) else v
             assert isinstance(v, torch.Tensor)
             # TODO: pin memory here?
@@ -85,7 +84,6 @@ class Features(NamedTuple):
         return Features(**d)
 
 
-@jaxtyped
 class BatchPadded(NamedTuple):
     feat: list[Features]
     text: Long[Tensor, 'B max_text_length']
@@ -159,7 +157,7 @@ class TTSDataset(torch.utils.data.Dataset):
 
         self._lengths.clear()
         for wp, _ in tqdm(self._samples, desc='Calculating spec lengths'):
-            length = os.path.getsize(wp) // (2 * self._audio_config.audio.hop_length)
+            length = os.path.getsize(wp) // (2 * self._audio_config.hop_length)
             self._lengths.append(length)
 
     @property
@@ -229,7 +227,6 @@ class TTSDataset(torch.utils.data.Dataset):
         return len(self._samples)
 
 
-@jaxtyped
 def collate_fn(batch: list[tuple[Features, SpecForm, WaveForm]]) -> BatchPadded:
     """Collates dataset features in tensors of equal length and a batch dimension."""
 
@@ -239,13 +236,14 @@ def collate_fn(batch: list[tuple[Features, SpecForm, WaveForm]]) -> BatchPadded:
     # todo: maybe consider removing texts from the features then?
     texts = tuple(f.symbols for f in feats)
 
-    text_padded = pad_sequence(texts, batch_first=True)
+    text_padded = pad_sequence(texts, batch_first=True).long()
     text_length = torch.as_tensor([t.size(0) for t in texts], dtype=torch.long)
 
     spec_padded = pad_sequence([s.T for s in specs], batch_first=True).transpose(2, 1)
     spec_length = torch.as_tensor([s.size(1) for s in specs], dtype=torch.long)
 
-    wave_padded = pad_sequence(waves, batch_first=True)
+    # make waves at least 3D like mels
+    wave_padded = pad_sequence(waves, batch_first=True).unsqueeze(1)
     wave_length = torch.as_tensor([w.size(0) for w in waves], dtype=torch.long)
 
     indices = torch.argsort(spec_length, descending=True)

@@ -24,8 +24,16 @@ from torch.utils.tensorboard import SummaryWriter
 import vits2.commons as commons
 import vits2.utils as utils
 
+from config import AudioConfig
+from config import DataConfig
 from config import ExperimentConfig
-from config import config
+from config import MelSpecConfig
+from config import ModelConfig
+from config import TextConfig
+from config import TrainConfig
+from ljspeech import FEAT_DIR
+from ljspeech import ROOT_DIR
+from ljspeech import WAVS_DIR
 from utils.data import BatchPadded
 from utils.data import DistributedBucketSampler
 from utils.data import TTSDataset
@@ -56,6 +64,83 @@ torch.autograd.set_detect_anomaly(True)
 torch.backends.cudnn.benchmark = True
 global_step = 0
 
+CONFIG = ExperimentConfig(
+    data=DataConfig(
+        wavs_dir=WAVS_DIR,
+        feat_dir=FEAT_DIR,
+        train_list_path=os.path.join(ROOT_DIR, 'train.list'),
+        valid_list_path=os.path.join(ROOT_DIR, 'valid.list'),
+        text=TextConfig(add_blank=True),
+        audio=AudioConfig(
+            sampling_rate=22050,
+            filter_length=1024,
+            hop_length=256,
+            win_length=1024,
+            mel=MelSpecConfig(
+                num_channels=80,
+            ),
+        ),
+        n_speakers=0,
+    ),
+    model=ModelConfig(
+        use_mel_posterior_encoder=True,
+        use_transformer_flows=True,
+        transformer_flow_type='pre_conv2',
+        use_spk_conditioned_encoder=False,
+        use_noise_scaled_mas=True,
+        use_duration_discriminator=True,
+        duration_discriminator_type='dur_disc_2',
+        ms_istft_vits=False,
+        mb_istft_vits=True,
+        istft_vits=False,
+        subbands=4,
+        gen_istft_n_fft=16,
+        gen_istft_hop_size=4,
+        inter_channels=192,
+        hidden_channels=96,
+        filter_channels=768,
+        n_heads=2,
+        n_layers=3,
+        kernel_size=3,
+        p_dropout=0.1,
+        resblock='1',
+        resblock_kernel_sizes=(3, 7, 11),
+        resblock_dilation_sizes=((1, 3, 5), (1, 3, 5), (1, 3, 5)),
+        upsample_rates=(4, 4),
+        upsample_initial_channel=256,
+        upsample_kernel_sizes=(16, 16),
+        n_layers_q=3,
+        use_spectral_norm=False,
+        use_sdp=False,
+    ),
+    train=TrainConfig(
+        log_interval=200,
+        eval_interval=1000,
+        seed=1234,
+        epochs=20000,
+        learning_rate=2e-4,
+        betas=(0.8, 0.99),
+        eps=1e-9,
+        batch_size=16,
+        fp16_run=False,
+        lr_decay=0.999875,
+        segment_size=8192,
+        init_lr_ratio=1,
+        warmup_epochs=0,
+        c_mel=45,
+        c_kl=1.0,
+        fft_sizes=(384, 683, 171),
+        hop_sizes=(30, 60, 10),
+        win_lengths=(150, 300, 60),
+        window='hann_window',
+    ),
+)
+
+# FIXME: training raises  warning:
+# Grad strides do not match bucket view strides ...
+# Check this: https://github.com/pytorch/pytorch/issues/47163
+# Seems like transpose operations might cause some issues, need to investigate
+
 
 # - base vits2 : Aug 29, 2023
 def main() -> None:
@@ -66,7 +151,7 @@ def main() -> None:
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '6060'
 
-    cfg = config
+    cfg = CONFIG
     mp.spawn(run, nprocs=n_gpus, args=(n_gpus, cfg))
     run(0, n_gpus=1, cfg=cfg)
 
@@ -289,7 +374,6 @@ def run(rank: int, n_gpus: int, cfg: ExperimentConfig) -> None:
             cfg,
             [net_g, net_d, net_dur_disc],
             [optim_g, optim_d, optim_dur_disc],
-            [scheduler_g, scheduler_d, scheduler_dur_disc],
             scaler,
             [train_loader, eval_loader],
             logger,
@@ -585,7 +669,7 @@ def evaluate(
             break
 
         y_hat, y_hat_mb, attn, mask, *_ = generator.module.infer(x, x_lengths, max_len=1000)
-        y_hat_lengths = mask.sum([1, 2]).long() * cfg.data.hop_length
+        y_hat_lengths = mask.sum([1, 2]).long() * cfg.data.audio.hop_length
 
         if cfg.model.use_mel_posterior_encoder:  # 2의 경우
             mel = spec
@@ -619,7 +703,7 @@ def evaluate(
         global_step=global_step,
         images=image_dict,
         audios=audio_dict,
-        audio_sampling_rate=cfg.data.sampling_rate,
+        audio_sampling_rate=cfg.data.audio.sampling_rate,
     )
     generator.train()
 

@@ -4,10 +4,6 @@ from dataclasses import dataclass
 from os import PathLike
 from typing import Literal
 
-from ljspeech import FEAT_DIR
-from ljspeech import ROOT_DIR
-from ljspeech import WAVS_DIR
-
 
 PROJ_DIR = os.path.abspath(os.path.dirname(__file__))
 LOGS_DIR = os.path.join(PROJ_DIR, 'logs')
@@ -42,6 +38,7 @@ class DataConfig:
     valid_list_path: str | PathLike
     text: TextConfig
     audio: AudioConfig
+    n_speakers: int
 
 
 # FIXME: this is heavy, need to split up and remove redundant flags
@@ -115,75 +112,3 @@ class ExperimentConfig:
         # a template, or get from somewhere?
         model_name = 'mini-mb-istft-vits2_LJSpeech'
         self.model_dir = os.path.join(LOGS_DIR, model_name)
-
-
-config = ExperimentConfig(
-    data=DataConfig(
-        wavs_dir=WAVS_DIR,
-        feat_dir=FEAT_DIR,
-        train_list_path=os.path.join(ROOT_DIR, 'train.list'),
-        valid_list_path=os.path.join(ROOT_DIR, 'valid.list'),
-        text=TextConfig(add_blank=True),
-        audio=AudioConfig(
-            sampling_rate=22050,
-            filter_length=1024,
-            hop_length=256,
-            win_length=1024,
-            mel=MelSpecConfig(
-                num_channels=80,
-            ),
-        ),
-    ),
-    model=ModelConfig(
-        use_mel_posterior_encoder=True,
-        use_transformer_flows=True,
-        transformer_flow_type='pre_conv2',
-        use_spk_conditioned_encoder=False,
-        use_noise_scaled_mas=True,
-        use_duration_discriminator=True,
-        duration_discriminator_type='dur_disc_2',
-        ms_istft_vits=False,
-        mb_istft_vits=True,
-        istft_vits=False,
-        subbands=4,
-        gen_istft_n_fft=16,
-        gen_istft_hop_size=4,
-        inter_channels=192,
-        hidden_channels=96,
-        filter_channels=768,
-        n_heads=2,
-        n_layers=3,
-        kernel_size=3,
-        p_dropout=0.1,
-        resblock='1',
-        resblock_kernel_sizes=(3, 7, 11),
-        resblock_dilation_sizes=((1, 3, 5), (1, 3, 5), (1, 3, 5)),
-        upsample_rates=(4, 4),
-        upsample_initial_channel=256,
-        upsample_kernel_sizes=(16, 16),
-        n_layers_q=3,
-        use_spectral_norm=False,
-        use_sdp=False,
-    ),
-    train=TrainConfig(
-        log_interval=200,
-        eval_interval=1000,
-        seed=1234,
-        epochs=20000,
-        learning_rate=2e-4,
-        betas=(0.8, 0.99),
-        eps=1e-9,
-        batch_size=32,
-        fp16_run=False,
-        lr_decay=0.999875,
-        segment_size=8192,
-        init_lr_ratio=1,
-        warmup_epochs=0,
-        c_mel=45,
-        c_kl=1.0,
-        fft_sizes=(384, 683, 171),
-        hop_sizes=(30, 60, 10),
-        win_lengths=(150, 300, 60),
-        window='hann_window',
-    ),
-)

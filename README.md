@@ -27,3 +27,8 @@ english_mfa \
 english_mfa \
 data/LJSpeech-1.1/alignment
 ```
+
+```shell
+mkdir vits2/monotonic_align
+python setup.py build_ext --inplace
+```
