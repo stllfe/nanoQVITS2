@@ -79,7 +79,8 @@ class Features(NamedTuple):
             v = v.astype(np.int32) if v.dtype in (np.uint32, np.uint8) else v
             v = torch.from_numpy(v) if isinstance(v, np.ndarray) else v
             assert isinstance(v, torch.Tensor)
-            # TODO: pin memory here?
+            if torch.cuda.is_available() and str(device).startswith('cuda'):
+                v = v.pin_memory()
             d[k] = v.to(device, non_blocking=True)
         return Features(**d)
 
@@ -182,9 +183,11 @@ class TTSDataset(torch.utils.data.Dataset):
         wave = wave / MAX_WAV_VALUE
         wave = wave.unsqueeze(0)
 
+        debug(f'{wavpath}: min={wave.min():.4f} max={wave.max():.4f} dtype={wave.dtype}', level=3)
+
         specpath = wavpath.with_suffix('.npy')
         if specpath.exists():
-            debug(f'Cache hit: {specpath}')
+            debug(f'Cache hit: {specpath}', level=2)
             spec = np.load(specpath)
             return torch.from_numpy(spec), torch.squeeze(wave, 0)
         if self._audio_config.mel:
@@ -213,7 +216,7 @@ class TTSDataset(torch.utils.data.Dataset):
         spec = torch.squeeze(spec, 0)
         wave = torch.squeeze(wave, 0)
         if self._cache:
-            debug(f'Cached: {specpath}')
+            debug(f'Cached: {specpath}', level=3)
             np.save(specpath, spec.numpy())
         return spec, wave
 
@@ -239,11 +242,11 @@ def collate_fn(batch: list[tuple[Features, SpecForm, WaveForm]]) -> BatchPadded:
     text_padded = pad_sequence(texts, batch_first=True).long()
     text_length = torch.as_tensor([t.size(0) for t in texts], dtype=torch.long)
 
-    spec_padded = pad_sequence([s.T for s in specs], batch_first=True).transpose(2, 1)
+    spec_padded = pad_sequence([s.T for s in specs], batch_first=True).transpose_(2, 1)
     spec_length = torch.as_tensor([s.size(1) for s in specs], dtype=torch.long)
 
     # make waves at least 3D like mels
-    wave_padded = pad_sequence(waves, batch_first=True).unsqueeze(1)
+    wave_padded = pad_sequence(waves, batch_first=True).unsqueeze_(1)
     wave_length = torch.as_tensor([w.size(0) for w in waves], dtype=torch.long)
 
     indices = torch.argsort(spec_length, descending=True)

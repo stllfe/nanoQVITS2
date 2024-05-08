@@ -4,7 +4,6 @@ import sys
 from dataclasses import asdict
 from logging import Logger
 from typing import Iterable
-from unittest.mock import MagicMock
 
 import torch
 import torch.distributed as dist
@@ -56,9 +55,7 @@ from vits2.models import SynthesizerTrn
 from vits2.pqmf import PQMF
 
 
-MaybeDDP = nn.Module | DDP
-NoLogger = MagicMock(Logger)
-NoWriter = MagicMock(SummaryWriter)
+ModuleOrDDP = nn.Module | DDP
 
 torch.autograd.set_detect_anomaly(True)
 torch.backends.cudnn.benchmark = True
@@ -142,6 +139,10 @@ CONFIG = ExperimentConfig(
 # Seems like transpose operations might cause some issues, need to investigate
 
 
+def ismaster(rank: int) -> bool:
+    return rank == 0
+
+
 # - base vits2 : Aug 29, 2023
 def main() -> None:
     """Assume Single Node Multi GPUs Training Only"""
@@ -152,26 +153,28 @@ def main() -> None:
     os.environ['MASTER_PORT'] = '6060'
 
     cfg = CONFIG
-    mp.spawn(run, nprocs=n_gpus, args=(n_gpus, cfg))
+    print(f'Detected GPUs: {n_gpus}')
+    if n_gpus > 1:
+        print('Multi GPU training starting...')
+        mp.spawn(run, nprocs=n_gpus, args=(n_gpus, cfg))
+    else:
+        print('Single GPU training starting...')
     run(0, n_gpus=1, cfg=cfg)
 
 
 def run(rank: int, n_gpus: int, cfg: ExperimentConfig) -> None:
     global global_step
 
-    if rank == 0:
+    if ismaster(rank):
         logger = utils.get_logger(cfg.model_dir)
         logger.info(cfg)
         utils.check_git_hash(cfg.model_dir)
         # TODO: add wandb option
         writer = SummaryWriter(log_dir=cfg.model_dir)
-        writer_eval = SummaryWriter(log_dir=os.path.join(cfg.model_dir, 'eval'))
     else:
-        # FIXME: very dirty way to create dummy objects
-        # are there any better solutions?
-        logger = NoLogger()
-        writer = NoWriter()
-        writer_eval = NoWriter()
+        # FIXME: are there any better solutions?
+        logger = None
+        writer = None
 
     if os.name == 'nt':
         dist.init_process_group(backend='gloo', init_method='env://', world_size=n_gpus, rank=rank)
@@ -217,8 +220,12 @@ def run(rank: int, n_gpus: int, cfg: ExperimentConfig) -> None:
         pin_memory=True,
         collate_fn=collate_fn,
         batch_sampler=train_sampler,
+        # TODO: looks like this produces a memory leak, investigate:
+        # find a way to track RAM in tensorboard/wandb
+        # persistent_workers=True,
+        prefetch_factor=8,
     )
-    if rank == 0:
+    if ismaster(rank):
         eval_dataset = TTSDataset(
             audio_config=cfg.data.audio,
             text_config=cfg.data.text,
@@ -377,7 +384,7 @@ def run(rank: int, n_gpus: int, cfg: ExperimentConfig) -> None:
             scaler,
             [train_loader, eval_loader],
             logger,
-            [writer, writer_eval],
+            writer,
         )
         scheduler_g.step()
         scheduler_d.step()
@@ -389,17 +396,16 @@ def train_and_evaluate(
     rank: int,
     epoch: int,
     cfg: ExperimentConfig,
-    nets: tuple[MaybeDDP, MaybeDDP, MaybeDDP],
+    nets: tuple[ModuleOrDDP, ModuleOrDDP, ModuleOrDDP],
     optims: tuple[Optimizer, Optimizer, Optimizer],
     scaler: GradScaler,
     loaders: tuple[DataLoader, DataLoader | None],
-    logger: Logger,
-    writers: tuple[SummaryWriter, SummaryWriter],
+    logger: Logger | None,
+    writer: SummaryWriter | None,
 ) -> None:
     net_g, net_d, net_dur_disc = nets
     optim_g, optim_d, optim_dur_disc = optims
     train_loader, eval_loader = loaders
-    writer, writer_eval = writers
 
     train_loader.batch_sampler.set_epoch(epoch)
     global global_step
@@ -411,7 +417,7 @@ def train_and_evaluate(
         net_dur_disc.train()
 
     loader: Iterable[BatchPadded] = tqdm.tqdm(
-        train_loader, desc='Loading training data', disable=rank != 0
+        train_loader, desc=f'[EPOCH {epoch:03}] Loading training data', disable=not ismaster(rank)
     )
 
     for batch_idx, batch in enumerate(loader):
@@ -537,124 +543,114 @@ def train_and_evaluate(
         scaler.step(optim_g)
         scaler.update()
 
-        if rank == 0:
-            if global_step % cfg.train.log_interval == 0:
-                lr = optim_g.param_groups[0]['lr']
+        if ismaster(rank) and global_step % cfg.train.log_interval == 0:
+            lr = optim_g.param_groups[0]['lr']
 
-                losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_dur, loss_kl, loss_subband]
+            losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_dur, loss_kl, loss_subband]
 
-                logger.info(
-                    'Train Epoch: {} [{:.0f}%]'.format(epoch, 100.0 * batch_idx / len(train_loader))
-                )
-                logger.info([x.item() for x in losses] + [global_step, lr])
+            logger.info(
+                'Train Epoch: {} [{:.0f}%]'.format(epoch, 100.0 * batch_idx / len(train_loader))
+            )
+            logger.info([x.item() for x in losses] + [global_step, lr])
 
-                scalar_dict = {
-                    'loss/g/total': loss_gen_all,
-                    'loss/d/total': loss_disc_all,
-                    'learning_rate': lr,
-                    'grad_norm_d': grad_norm_d,
-                    'grad_norm_g': grad_norm_g,
-                }
+            scalar_dict = {
+                'loss/g/total': loss_gen_all,
+                'loss/d/total': loss_disc_all,
+                'learning_rate': lr,
+                'grad_norm_d': grad_norm_d,
+                'grad_norm_g': grad_norm_g,
+            }
 
-                if net_dur_disc is not None:  # 2인 경우
-                    scalar_dict.update(
-                        {
-                            'loss/dur_disc/total': loss_dur_disc_all,
-                            'grad_norm_dur_disc': grad_norm_dur_disc,
-                        }
-                    )
+            if net_dur_disc is not None:  # 2인 경우
                 scalar_dict.update(
                     {
-                        'loss/g/fm': loss_fm,
-                        'loss/g/mel': loss_mel,
-                        'loss/g/dur': loss_dur,
-                        'loss/g/kl': loss_kl,
-                        'loss/g/subband': loss_subband,
+                        'loss/dur_disc/total': loss_dur_disc_all,
+                        'grad_norm_dur_disc': grad_norm_dur_disc,
                     }
                 )
-
-                scalar_dict.update({'loss/g/{}'.format(i): v for i, v in enumerate(losses_gen)})
-                scalar_dict.update(
-                    {'loss/d_r/{}'.format(i): v for i, v in enumerate(losses_disc_r)}
-                )
-                scalar_dict.update(
-                    {'loss/d_g/{}'.format(i): v for i, v in enumerate(losses_disc_g)}
-                )
-
-                # if net_dur_disc is not None: # - 보류?
-                #   scalar_dict.update({"loss/dur_disc_r" : f"{losses_dur_disc_r}"})
-                #   scalar_dict.update({"loss/dur_disc_g" : f"{losses_dur_disc_g}"})
-                #   scalar_dict.update({"loss/dur_gen" : f"{loss_dur_gen}"})
-
-                image_dict = {
-                    'slice/mel_org': utils.plot_spectrogram_to_numpy(y_mel[0].data.cpu().numpy()),
-                    'slice/mel_gen': utils.plot_spectrogram_to_numpy(
-                        y_hat_mel[0].data.cpu().numpy()
-                    ),
-                    'all/mel': utils.plot_spectrogram_to_numpy(mel[0].data.cpu().numpy()),
-                    'all/attn': utils.plot_alignment_to_numpy(attn[0, 0].data.cpu().numpy()),
+            scalar_dict.update(
+                {
+                    'loss/g/fm': loss_fm,
+                    'loss/g/mel': loss_mel,
+                    'loss/g/dur': loss_dur,
+                    'loss/g/kl': loss_kl,
+                    'loss/g/subband': loss_subband,
                 }
-                utils.summarize(
-                    writer=writer, global_step=global_step, images=image_dict, scalars=scalar_dict
-                )
+            )
 
-            if global_step % cfg.train.eval_interval == 0:
-                evaluate(cfg, net_g, eval_loader, writer_eval)
+            scalar_dict.update({'loss/g/{}'.format(i): v for i, v in enumerate(losses_gen)})
+            scalar_dict.update({'loss/d_r/{}'.format(i): v for i, v in enumerate(losses_disc_r)})
+            scalar_dict.update({'loss/d_g/{}'.format(i): v for i, v in enumerate(losses_disc_g)})
+
+            # if net_dur_disc is not None: # - 보류?
+            #   scalar_dict.update({"loss/dur_disc_r" : f"{losses_dur_disc_r}"})
+            #   scalar_dict.update({"loss/dur_disc_g" : f"{losses_dur_disc_g}"})
+            #   scalar_dict.update({"loss/dur_gen" : f"{loss_dur_gen}"})
+
+            image_dict = {
+                'slice/mel_org': utils.plot_spectrogram_to_numpy(y_mel[0].data.cpu().numpy()),
+                'slice/mel_gen': utils.plot_spectrogram_to_numpy(y_hat_mel[0].data.cpu().numpy()),
+                'all/mel': utils.plot_spectrogram_to_numpy(mel[0].data.cpu().numpy()),
+                'all/attn': utils.plot_alignment_to_numpy(attn[0, 0].data.cpu().numpy()),
+            }
+            utils.summarize(
+                writer=writer, global_step=global_step, images=image_dict, scalars=scalar_dict
+            )
+
+        if ismaster(rank) and global_step % cfg.train.eval_interval == 0:
+            evaluate(cfg, net_g, eval_loader, writer)
+            utils.save_checkpoint(
+                net_g,
+                optim_g,
+                cfg.train.learning_rate,
+                epoch,
+                os.path.join(cfg.model_dir, 'G_{}.pth'.format(global_step)),
+            )
+            utils.save_checkpoint(
+                net_d,
+                optim_d,
+                cfg.train.learning_rate,
+                epoch,
+                os.path.join(cfg.model_dir, 'D_{}.pth'.format(global_step)),
+            )
+            if net_dur_disc is not None:
                 utils.save_checkpoint(
-                    net_g,
-                    optim_g,
+                    net_dur_disc,
+                    optim_dur_disc,
                     cfg.train.learning_rate,
                     epoch,
-                    os.path.join(cfg.model_dir, 'G_{}.pth'.format(global_step)),
+                    os.path.join(cfg.model_dir, 'DUR_{}.pth'.format(global_step)),
                 )
-                utils.save_checkpoint(
-                    net_d,
-                    optim_d,
-                    cfg.train.learning_rate,
-                    epoch,
-                    os.path.join(cfg.model_dir, 'D_{}.pth'.format(global_step)),
-                )
-                if net_dur_disc is not None:
-                    utils.save_checkpoint(
-                        net_dur_disc,
-                        optim_dur_disc,
-                        cfg.train.learning_rate,
-                        epoch,
-                        os.path.join(cfg.model_dir, 'DUR_{}.pth'.format(global_step)),
-                    )
 
-                prev_g = os.path.join(
-                    cfg.model_dir, 'G_{}.pth'.format(global_step - 3 * cfg.train.eval_interval)
+            prev_g = os.path.join(
+                cfg.model_dir, 'G_{}.pth'.format(global_step - 3 * cfg.train.eval_interval)
+            )
+            if os.path.exists(prev_g):
+                os.remove(prev_g)
+                prev_d = os.path.join(
+                    cfg.model_dir, 'D_{}.pth'.format(global_step - 3 * cfg.train.eval_interval)
                 )
-                if os.path.exists(prev_g):
-                    os.remove(prev_g)
-                    prev_d = os.path.join(
-                        cfg.model_dir, 'D_{}.pth'.format(global_step - 3 * cfg.train.eval_interval)
+                if os.path.exists(prev_d):
+                    os.remove(prev_d)
+                    prev_dur = os.path.join(
+                        cfg.model_dir,
+                        'DUR_{}.pth'.format(global_step - 3 * cfg.train.eval_interval),
                     )
-                    if os.path.exists(prev_d):
-                        os.remove(prev_d)
-                        prev_dur = os.path.join(
-                            cfg.model_dir,
-                            'DUR_{}.pth'.format(global_step - 3 * cfg.train.eval_interval),
-                        )
-                        if os.path.exists(prev_dur):
-                            os.remove(prev_dur)
+                    if os.path.exists(prev_dur):
+                        os.remove(prev_dur)
 
         global_step += 1
-
-    if rank == 0:
-        logger.info('====> Epoch: {}'.format(epoch))
 
 
 def evaluate(
     cfg: ExperimentConfig,
-    generator: MaybeDDP,
-    eval_loader: Iterable[BatchPadded],
-    writer_eval: SummaryWriter,
+    generator: ModuleOrDDP,
+    loader: Iterable[BatchPadded],
+    writer: SummaryWriter,
 ) -> None:
     generator.eval()
     with torch.no_grad():
-        for batch_idx, batch in enumerate(eval_loader):
+        for batch_idx, batch in enumerate(loader):
             x, x_lengths = batch.text.cuda(0), batch.text_length.cuda(0)
             spec, spec_lengths = batch.spec.cuda(0), batch.spec_length.cuda(0)
             y, y_lengths = batch.wave.cuda(0), batch.wave_length.cuda(0)
@@ -692,14 +688,14 @@ def evaluate(
             fmin=cfg.data.audio.mel.fmin,
             fmax=cfg.data.audio.mel.fmax,
         )
-    image_dict = {'gen/mel': utils.plot_spectrogram_to_numpy(y_hat_mel[0].cpu().numpy())}
-    audio_dict = {'gen/audio': y_hat[0, :, : y_hat_lengths[0]]}
+    image_dict = {'val/gen/mel': utils.plot_spectrogram_to_numpy(y_hat_mel[0].cpu().numpy())}
+    audio_dict = {'val/gen/audio': y_hat[0, :, : y_hat_lengths[0]]}
     if global_step == 0:
-        image_dict.update({'gt/mel': utils.plot_spectrogram_to_numpy(mel[0].cpu().numpy())})
-        audio_dict.update({'gt/audio': y[0, :, : y_lengths[0]]})
+        image_dict.update({'val/gt/mel': utils.plot_spectrogram_to_numpy(mel[0].cpu().numpy())})
+        audio_dict.update({'val/gt/audio': y[0, :, : y_lengths[0]]})
 
     utils.summarize(
-        writer=writer_eval,
+        writer=writer,
         global_step=global_step,
         images=image_dict,
         audios=audio_dict,
