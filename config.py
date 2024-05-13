@@ -9,6 +9,10 @@ PROJ_DIR = os.path.abspath(os.path.dirname(__file__))
 LOGS_DIR = os.path.join(PROJ_DIR, 'logs')
 
 
+# TODO: looks like this class is a bit too much, we can fuse it with the audio config
+# since we are most likely to use melspecs anyway
+
+
 @dataclass
 class MelSpecConfig:
     fmin: float | None = 0
@@ -67,7 +71,7 @@ class ModelConfig:
     n_layers: int
     kernel_size: int
     p_dropout: float
-    resblock: Literal['1', '2']
+    resblock: Literal['1', '2']  # this is probably not enough
     resblock_kernel_sizes: tuple[int, int, int]
     resblock_dilation_sizes: tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]
     upsample_rates: tuple[int, int]
@@ -109,6 +113,7 @@ class ExperimentConfig:
 
     def __post_init__(self) -> None:
         # TODO: need a beter solution
-        # a template, or get from somewhere?
+        # a template, or get from CLI or environment?
+        # default to some timecoded string?
         model_name = 'mini-mb-istft-vits2_LJSpeech'
         self.model_dir = os.path.join(LOGS_DIR, model_name)

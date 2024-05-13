@@ -5,6 +5,7 @@ from dataclasses import asdict
 from logging import Logger
 from typing import Iterable
 
+import psutil
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -416,6 +417,7 @@ def train_and_evaluate(
     if net_dur_disc is not None:  # vits2
         net_dur_disc.train()
 
+    process = psutil.Process()
     loader: Iterable[BatchPadded] = tqdm.tqdm(
         train_loader, desc=f'[EPOCH {epoch:03}] Loading training data', disable=not ismaster(rank)
     )
@@ -554,6 +556,9 @@ def train_and_evaluate(
             logger.info([x.item() for x in losses] + [global_step, lr])
 
             scalar_dict = {
+                'mem/proc/rssMB': process.memory_info().rss / (1024**2),
+                'mem/sys/availableMB': psutil.virtual_memory().available / (1024**2),
+                'mem/sys/percent': psutil.virtual_memory().percent,
                 'loss/g/total': loss_gen_all,
                 'loss/d/total': loss_disc_all,
                 'learning_rate': lr,

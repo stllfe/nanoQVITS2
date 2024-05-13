@@ -80,7 +80,7 @@ class Features(NamedTuple):
             v = torch.from_numpy(v) if isinstance(v, np.ndarray) else v
             assert isinstance(v, torch.Tensor)
             if torch.cuda.is_available() and str(device).startswith('cuda'):
-                v = v.pin_memory()
+                v = v.pin_memory(device)
             d[k] = v.to(device, non_blocking=True)
         return Features(**d)
 
