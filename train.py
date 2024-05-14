@@ -430,15 +430,15 @@ def train_and_evaluate(
             net_g.module.current_mas_noise_scale = max(current_mas_noise_scale, 0.0)
         x, x_lengths = (
             batch.text.cuda(rank, non_blocking=True),
-            batch.text_length.cuda(rank, non_blocking=True),
+            batch.text_lengths.cuda(rank, non_blocking=True),
         )
         spec, spec_lengths = (
             batch.spec.cuda(rank, non_blocking=True),
-            batch.spec_length.cuda(rank, non_blocking=True),
+            batch.spec_lengths.cuda(rank, non_blocking=True),
         )
         y, y_lengths = (
             batch.wave.cuda(rank, non_blocking=True),
-            batch.wave_length.cuda(rank, non_blocking=True),
+            batch.wave_lengths.cuda(rank, non_blocking=True),
         )
 
         with autocast(enabled=cfg.train.fp16_run):
@@ -656,9 +656,9 @@ def evaluate(
     generator.eval()
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
-            x, x_lengths = batch.text.cuda(0), batch.text_length.cuda(0)
-            spec, spec_lengths = batch.spec.cuda(0), batch.spec_length.cuda(0)
-            y, y_lengths = batch.wave.cuda(0), batch.wave_length.cuda(0)
+            x, x_lengths = batch.text.cuda(0), batch.text_lengths.cuda(0)
+            spec, spec_lengths = batch.spec.cuda(0), batch.spec_lengths.cuda(0)
+            y, y_lengths = batch.wave.cuda(0), batch.wave_lengths.cuda(0)
 
             # remove else
             x = x[:1]
@@ -693,11 +693,11 @@ def evaluate(
             fmin=cfg.data.audio.mel.fmin,
             fmax=cfg.data.audio.mel.fmax,
         )
-    image_dict = {'val/gen/mel': utils.plot_spectrogram_to_numpy(y_hat_mel[0].cpu().numpy())}
-    audio_dict = {'val/gen/audio': y_hat[0, :, : y_hat_lengths[0]]}
+    image_dict = {'mel/gen': utils.plot_spectrogram_to_numpy(y_hat_mel[0].cpu().numpy())}
+    audio_dict = {'audio/gen': y_hat[0, :, : y_hat_lengths[0]]}
     if global_step == 0:
-        image_dict.update({'val/gt/mel': utils.plot_spectrogram_to_numpy(mel[0].cpu().numpy())})
-        audio_dict.update({'val/gt/audio': y[0, :, : y_lengths[0]]})
+        image_dict.update({'mel/gt': utils.plot_spectrogram_to_numpy(mel[0].cpu().numpy())})
+        audio_dict.update({'audio/gt': y[0, :, : y_lengths[0]]})
 
     utils.summarize(
         writer=writer,
