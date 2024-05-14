@@ -4,10 +4,10 @@
 
 A... [vits2_pytorch](https://github.com/p0p4k/vits2_pytorch) and [MB-iSTFT-VITS](https://github.com/MasayaKawamura/MB-iSTFT-VITS) hybrid... Gods, an abomination! Who created this atrocity?
 
-This is an experimental build. Does not guarantee performance, therefore. 
+This is an experimental build. Does not guarantee performance, therefore.
 
 According to [shigabeev](https://github.com/shigabeev)'s [experiment](https://github.com/FENRlR/MB-iSTFT-VITS2/issues/2), it can now dare claim the word SOTA for its performance (at least for Russian).
- 
+
 
 ## pre-requisites
 1. Python >= 3.8
@@ -18,28 +18,28 @@ According to [shigabeev](https://github.com/shigabeev)'s [experiment](https://gi
    ```
    pip install -r requirements.txt
    ```
-   
+
     ~~1. You may need to install espeak first: `apt-get install espeak`~~
-   
+
    If you want to proceed with those cleaned texts in [filelists](filelists), you need to install espeak.
    ```
    apt-get install espeak
    ```
 7. Prepare datasets & configuration
-   
+
     ~~1. ex) Download and extract the LJ Speech dataset, then rename or create a link to the dataset folder: `ln -s /path/to/LJSpeech-1.1/wavs DUMMY1`~~
-   1. wav files (22050Hz Mono, PCM-16) 
+   1. wav files (22050Hz Mono, PCM-16)
    2. Prepare text files. One for training<sup>[(ex)](filelists/ljs_audio_text_train_filelist.txt)</sup> and one for validation<sup>[(ex)](filelists/ljs_audio_text_val_filelist.txt)</sup>. Split your dataset to each files. As shown in these examples, the datasets in validation file should be fewer than the training one, while being unique from those of training text.
-      
+
       - Single speaker<sup>[(ex)](filelists/ljs_audio_text_test_filelist.txt)</sup>
-      
+
       ```
       wavfile_path|transcript
       ```
-      
+
 
       - Multi speaker<sup>[(ex)](filelists/vctk_audio_sid_text_test_filelist.txt)</sup>
-      
+
       ```
       wavfile_path|speaker_id|transcript
       ```
@@ -49,14 +49,14 @@ According to [shigabeev](https://github.com/shigabeev)'s [experiment](https://gi
       python preprocess.py --text_index 1 --filelists PATH_TO_train.txt --text_cleaners CLEANER_NAME
       python preprocess.py --text_index 1 --filelists PATH_TO_val.txt --text_cleaners CLEANER_NAME
       ```
-      
+
       - Multi speaker
       ```
       python preprocess.py --text_index 2 --filelists PATH_TO_train.txt --text_cleaners CLEANER_NAME
       python preprocess.py --text_index 2 --filelists PATH_TO_val.txt --text_cleaners CLEANER_NAME
       ```
-      The resulting cleaned text would be like [this(single)](filelists/ljs_audio_text_test_filelist.txt.cleaned). <sup>[ex - multi](filelists/vctk_audio_sid_text_test_filelist.txt.cleaned)</sup> 
-      
+      The resulting cleaned text would be like [this(single)](filelists/ljs_audio_text_test_filelist.txt.cleaned). <sup>[ex - multi](filelists/vctk_audio_sid_text_test_filelist.txt.cleaned)</sup>
+
 9. Build Monotonic Alignment Search.
 ```sh
 # Cython-version Monotonoic Alignment Search

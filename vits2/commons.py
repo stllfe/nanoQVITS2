@@ -3,8 +3,7 @@ import math
 import numpy as np
 import torch
 
-from numpy.typing import ArrayLike
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from torch.nn import functional as F
 
 

@@ -26,14 +26,15 @@ def design_prototype_filter(taps=62, cutoff_ratio=0.15, beta=9.0):
         https://ieeexplore.ieee.org/abstract/document/681427
     """
     # check the arguments are valid
-    assert taps % 2 == 0, "The number of taps mush be even number."
-    assert 0.0 < cutoff_ratio < 1.0, "Cutoff ratio must be > 0.0 and < 1.0."
+    assert taps % 2 == 0, 'The number of taps mush be even number.'
+    assert 0.0 < cutoff_ratio < 1.0, 'Cutoff ratio must be > 0.0 and < 1.0.'
 
     # make initial filter
     omega_c = np.pi * cutoff_ratio
     with np.errstate(invalid='ignore'):
-        h_i = np.sin(omega_c * (np.arange(taps + 1) - 0.5 * taps)) \
-            / (np.pi * (np.arange(taps + 1) - 0.5 * taps))
+        h_i = np.sin(omega_c * (np.arange(taps + 1) - 0.5 * taps)) / (
+            np.pi * (np.arange(taps + 1) - 0.5 * taps)
+        )
     h_i[taps // 2] = np.cos(0) * cutoff_ratio  # fix nan due to indeterminate form
 
     # apply kaiser window
@@ -65,28 +66,40 @@ class PQMF(torch.nn.Module):
         h_analysis = np.zeros((subbands, len(h_proto)))
         h_synthesis = np.zeros((subbands, len(h_proto)))
         for k in range(subbands):
-            h_analysis[k] = 2 * h_proto * np.cos(
-                (2 * k + 1) * (np.pi / (2 * subbands)) *
-                (np.arange(taps + 1) - ((taps - 1) / 2)) +
-                (-1) ** k * np.pi / 4)
-            h_synthesis[k] = 2 * h_proto * np.cos(
-                (2 * k + 1) * (np.pi / (2 * subbands)) *
-                (np.arange(taps + 1) - ((taps - 1) / 2)) -
-                (-1) ** k * np.pi / 4)
+            h_analysis[k] = (
+                2
+                * h_proto
+                * np.cos(
+                    (2 * k + 1)
+                    * (np.pi / (2 * subbands))
+                    * (np.arange(taps + 1) - ((taps - 1) / 2))
+                    + (-1) ** k * np.pi / 4
+                )
+            )
+            h_synthesis[k] = (
+                2
+                * h_proto
+                * np.cos(
+                    (2 * k + 1)
+                    * (np.pi / (2 * subbands))
+                    * (np.arange(taps + 1) - ((taps - 1) / 2))
+                    - (-1) ** k * np.pi / 4
+                )
+            )
 
         # convert to tensor
         analysis_filter = torch.from_numpy(h_analysis).float().unsqueeze(1).to(device)
         synthesis_filter = torch.from_numpy(h_synthesis).float().unsqueeze(0).to(device)
 
         # register coefficients as beffer
-        self.register_buffer("analysis_filter", analysis_filter)
-        self.register_buffer("synthesis_filter", synthesis_filter)
+        self.register_buffer('analysis_filter', analysis_filter)
+        self.register_buffer('synthesis_filter', synthesis_filter)
 
         # filter for downsampling & upsampling
         updown_filter = torch.zeros((subbands, subbands, subbands)).float().to(device)
         for k in range(subbands):
             updown_filter[k, k, 0] = 1.0
-        self.register_buffer("updown_filter", updown_filter)
+        self.register_buffer('updown_filter', updown_filter)
         self.subbands = subbands
 
         # keep padding info
