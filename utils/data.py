@@ -14,9 +14,9 @@ import numpy as np
 import torch
 import torch.utils.data
 
-from beartype import beartype
-from jaxtyping import Float, Int64, UInt8, UInt32, jaxtyped
 from numpy.typing import NDArray
+from torch import FloatTensor
+from torch import LongTensor
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
@@ -31,13 +31,9 @@ from vits2.mel_processing import mel_spectrogram_torch
 from vits2.mel_processing import spectrogram_torch
 
 
-jaxtyped = jaxtyped(typechecker=beartype)
-
-Array = TypeVar('Array', Tensor, NDArray)
-
-Long = Int64
-WaveForm = Float[Tensor, '*B 1 wave_samples']
-SpecForm = Float[Tensor, '*B num_channels spec_samples']
+AnyArray = TypeVar('AnyArray', Tensor, NDArray)
+WaveForm = FloatTensor
+SpecForm = FloatTensor
 
 
 class Utterance(NamedTuple):
@@ -46,11 +42,11 @@ class Utterance(NamedTuple):
 
 
 class Features(NamedTuple):
-    symbols: UInt8[Array, '*B text_length']
-    tokembs: Float[Array, '*B num_tokens']
-    tokspan: UInt32[Array, '*B num_tokens 2']
-    wrdspan: UInt32[Array, '*B num_words 2']
-    qfeatures: UInt8[Array, '*B num_words num_qfeats']
+    symbols: AnyArray
+    tokembs: AnyArray
+    tokspan: AnyArray
+    wrdspan: AnyArray
+    qfeatures: AnyArray
 
     @classmethod
     def load(cls, path: str | os.PathLike) -> Features:
@@ -87,12 +83,12 @@ class Features(NamedTuple):
 
 class BatchPadded(NamedTuple):
     feat: list[Features]
-    text: Long[Tensor, 'B max_text_length']
-    text_length: Long[Tensor, ' B']
+    text: LongTensor
+    text_lengths: LongTensor
     spec: SpecForm
-    spec_length: Long[Tensor, ' B']
+    spec_lengths: LongTensor
     wave: WaveForm
-    wave_length: Long[Tensor, ' B']
+    wave_lengths: LongTensor
 
 
 def load_filename_list(list_path: str | os.PathLike) -> list[str]:
@@ -183,6 +179,7 @@ class TTSDataset(torch.utils.data.Dataset):
         wave = wave / MAX_WAV_VALUE
         wave = wave.unsqueeze(0)
 
+        # TODO: clip values here or normalize straight to [-1, 1] range?
         debug(f'{wavpath}: min={wave.min():.4f} max={wave.max():.4f} dtype={wave.dtype}', level=3)
 
         specpath = wavpath.with_suffix('.npy')
@@ -226,7 +223,7 @@ class TTSDataset(torch.utils.data.Dataset):
         feat = self.get_feats(fp)
         return feat.torch(), spec, wave
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._samples)
 
 
@@ -240,26 +237,26 @@ def collate_fn(batch: list[tuple[Features, SpecForm, WaveForm]]) -> BatchPadded:
     texts = tuple(f.symbols for f in feats)
 
     text_padded = pad_sequence(texts, batch_first=True).long()
-    text_length = torch.as_tensor([t.size(0) for t in texts], dtype=torch.long)
+    text_lengths = torch.as_tensor([t.size(0) for t in texts], dtype=torch.long)
 
     spec_padded = pad_sequence([s.T for s in specs], batch_first=True).transpose_(2, 1)
-    spec_length = torch.as_tensor([s.size(1) for s in specs], dtype=torch.long)
+    spec_lengths = torch.as_tensor([s.size(1) for s in specs], dtype=torch.long)
 
     # make waves at least 3D like mels
     wave_padded = pad_sequence(waves, batch_first=True).unsqueeze_(1)
-    wave_length = torch.as_tensor([w.size(0) for w in waves], dtype=torch.long)
+    wave_lengths = torch.as_tensor([w.size(0) for w in waves], dtype=torch.long)
 
-    indices = torch.argsort(spec_length, descending=True)
+    indices = torch.argsort(spec_lengths, descending=True)
     reorder = op.itemgetter(indices)
 
     return BatchPadded(
         feat=tuple(feats[i] for i in indices),
         text=reorder(text_padded),
-        text_length=reorder(text_length),
+        text_lengths=reorder(text_lengths),
         spec=reorder(spec_padded),
-        spec_length=reorder(spec_length),
+        spec_lengths=reorder(spec_lengths),
         wave=reorder(wave_padded),
-        wave_length=reorder(wave_length),
+        wave_lengths=reorder(wave_lengths),
     )
 
 
@@ -365,7 +362,7 @@ class DistributedBucketSampler(torch.utils.data.DistributedSampler):
         assert len(self.batches) * self.batch_size == self.num_samples
         return iter(self.batches)
 
-    def _bisect(self, x, lo=0, hi=None) -> int:
+    def _bisect(self, x: int, lo=0, hi: int | None = None) -> int:
         if hi is None:
             hi = len(self.boundaries) - 1
         if hi > lo:
