@@ -82,7 +82,7 @@ class Features(NamedTuple):
 
 
 class BatchPadded(NamedTuple):
-    feat: list[Features]
+    feat: tuple[Features]
     text: LongTensor
     text_lengths: LongTensor
     spec: SpecForm
@@ -221,6 +221,7 @@ class TTSDataset(torch.utils.data.Dataset):
         wp, fp = self._samples[index]
         spec, wave = self.get_audio(wp)
         feat = self.get_feats(fp)
+        debug(f'{wp.stem} loaded', level=2, rank=0)
         return feat.torch(), spec, wave
 
     def __len__(self) -> int:

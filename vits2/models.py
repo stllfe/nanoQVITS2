@@ -1,5 +1,8 @@
 import math
 
+from collections.abc import Sequence
+
+import numpy as np
 import torch
 
 from torch import nn
@@ -11,6 +14,7 @@ from torch.nn.utils import remove_weight_norm
 from torch.nn.utils import spectral_norm
 from torch.nn.utils import weight_norm
 
+from utils.data import Features
 from vits2 import attentions
 from vits2 import commons
 from vits2 import modules
@@ -342,16 +346,15 @@ class TextEncoder(nn.Module):
         )
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
-    def forward(self, x, x_lengths, g=None):
+    def forward(self, x, x_lengths, g=None, return_hidden: int | None = None):
         x = self.emb(x) * math.sqrt(self.hidden_channels)  # [b, t, h]
         x = torch.transpose(x, 1, -1)  # [b, h, t]
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(x.dtype)
-
-        x = self.encoder(x * x_mask, x_mask, g=g)
+        x, x_cond = self.encoder(x * x_mask, x_mask, g=g, return_hidden=return_hidden)
         stats = self.proj(x) * x_mask
 
         m, logs = torch.split(stats, self.out_channels, dim=1)
-        return x, m, logs, x_mask
+        return x, x_cond, m, logs, x_mask
 
 
 class ResidualCouplingTransformersLayer2(nn.Module):  # vits2
@@ -1450,6 +1453,140 @@ class MultiPeriodDiscriminator(torch.nn.Module):
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
 
+class QuantizedWordFeaturesPredictor(torch.nn.Module):
+    def __init__(
+        self,
+        token_emb_dim: int,
+        text_hidden_channels: int,
+        inner_hidden_dim: int = 128,
+        emb_dim: int = 128,
+        n_feats: int = 6,
+        q_dim: int = 5 + 1,  # additional for empty (pad) label
+        dropout: float = 0.2,
+        bias: bool = True,
+    ) -> None:
+        super().__init__()
+        self.token_emb_dim = token_emb_dim
+        self.n_features = n_feats
+        self.text_hidden_size = text_hidden_channels
+        self.hidden_dim = inner_hidden_dim
+
+        # FIXME: refactor this to be a stack of blocks (I'd also like to add a residual path maybe?)
+        self.conv0 = torch.nn.Conv1d(
+            self.token_emb_dim + 2 * self.hidden_dim, self.hidden_dim, kernel_size=(3,), padding=1
+        )
+        self.bn0 = torch.nn.BatchNorm1d(num_features=self.hidden_dim)
+        self.conv1 = torch.nn.Conv1d(
+            self.hidden_dim, self.hidden_dim, kernel_size=(3,), padding=1, bias=bias
+        )
+        self.bn1 = torch.nn.BatchNorm1d(num_features=self.hidden_dim)
+        self.conv2 = torch.nn.Conv1d(
+            self.hidden_dim, self.hidden_dim, kernel_size=(3,), padding=1, bias=bias
+        )
+        self.bn2 = torch.nn.BatchNorm1d(num_features=self.hidden_dim)
+        self.conv3 = torch.nn.Conv1d(
+            self.hidden_dim, self.hidden_dim, kernel_size=(3,), padding=1, bias=bias
+        )
+        self.bn3 = torch.nn.BatchNorm1d(num_features=self.hidden_dim)
+        self.tok_rnn = torch.nn.GRU(
+            self.hidden_dim, self.hidden_dim, num_layers=1, batch_first=True, bidirectional=True
+        )
+        # this is kinda old version, increases latency and according to authors doesn't really improve anything
+        self.chr_rnn = torch.nn.GRU(
+            self.text_hidden_size,
+            self.hidden_dim,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True,
+            bias=bias,
+        )
+
+        # TODO: instead, we can make a big single matrix and split it to n_features (just like QKV for attention)
+        # just to pretend we are cool kids
+        heads = []
+        embs = []
+        for _ in range(self.n_features):
+            heads.append(torch.nn.Linear(self.hidden_dim * 2, q_dim))
+            embs.append(nn.Embedding(q_dim, emb_dim, padding_idx=0))
+
+        self.heads = nn.ModuleList(heads)
+        self.embs = nn.ModuleList(embs)
+        self.dropout = torch.nn.Dropout(dropout)
+
+    def from_labels(self, labels: torch.Tensor) -> torch.Tensor:
+        embeds = []
+        for j in range(self.n_features):
+            embeds.append(self.embs[j](labels[:, :, j, :]))
+
+        # [B, token_len, n_features, emb_dim]
+        embeds = torch.cat(embeds, dim=2)
+        return embeds
+
+    def from_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        # [B, token_len, q_dim, n_features] -> [B, token_len, n_features]
+        labels = logits.log_softmax(dim=2).argmax(dim=2)
+        labels = labels.unsqueeze(-1)
+        return self.from_labels(labels)
+
+    def forward(self, x_cond: torch.Tensor, features: Sequence[Features]) -> torch.Tensor:
+        # [B, text_hidden_channels, text_len] -> [B, text_len, text_hidden_channels]
+        x_cond = x_cond.permute(0, 2, 1)
+
+        # TODO: add feature lengths, and pack here for correct RNN inference
+        chr_rnn_out, _ = self.chr_rnn(x_cond)
+        # FIXME: we should have these collated as well
+        tok_embs = (
+            torch.stack([f.tokembs for f in features])
+            .to(x_cond.device, non_blocking=True)
+            .squeeze(1)  # FIXME: embeddings should be flat here already!!
+        )
+        tok_rnn_out = torch.zeros(
+            (x_cond.shape[0], tok_embs.shape[1], 2 * self.hidden_dim),
+            dtype=torch.float,
+            device=x_cond.device,
+        )
+
+        for i in range(x_cond.shape[0]):
+            fi = features[i]
+            # FIXME: need to figure out how to handle interspersed texts!
+
+            # version 1 (current): we grab just a last char hidden from the text encoder
+            # however we may loose some valuable info form the intersperse chars!
+            # my hope though is that biRNN will utilize any valuable info from them if applies
+
+            # hence, version 2 idea: maybe use the sum (or mean) of the char + its left-side intersperse? (maybe even right-side?)
+
+            # as per authors we may select the last char hidden (of each token) from the text encoder outputs directly
+            # but the problem with not taking intersperse neighbors into account still kinda applies then...
+            tok_rnn_out[i] = torch.index_select(
+                # FIXME: works only for interspersed version
+                chr_rnn_out[0][1::2],  # FIXME: 0->i?
+                dim=0,
+                index=fi.tokspan[:, 1] - 1,
+            )
+
+        x = torch.cat((tok_embs, tok_rnn_out), dim=2)
+
+        x = self.dropout(torch.relu(self.bn0(self.conv0(x.transpose(1, 2)))))
+        x = self.dropout(torch.relu(self.bn1(self.conv1(x))))
+        x = self.dropout(torch.relu(self.bn2(self.conv2(x))))
+        x = self.dropout(torch.relu(self.bn3(self.conv3(x))))
+        x = x.transpose(1, 2)
+
+        tok_rnn_out, _ = self.tok_rnn(x)  # [B, token_len, inner_hidden_dim * 2]
+
+        logits = []
+        for j in range(self.n_features):
+            logits.append(self.heads[j](tok_rnn_out).unsqueeze(3))
+
+        # [B, token_len, q_dim, n_features]
+        logits = torch.cat(logits, dim=3)
+        return logits
+
+
+# I really want to rename it to something like Generator
+# and overall copy the naming logic from HuggingFace:
+# https://github.com/huggingface/transformers/tree/v4.40.2/src/transformers/models/vits
 class SynthesizerTrn(nn.Module):
     """
     Synthesizer for Training
@@ -1483,6 +1620,8 @@ class SynthesizerTrn(nn.Module):
         subbands=False,
         istft_vits=False,
         is_onnx=False,
+        q_condition_layer: int = 2,
+        q_teacher_forcing: float = 1.0,
         **kwargs,
     ):
         super().__init__()
@@ -1622,14 +1761,77 @@ class SynthesizerTrn(nn.Module):
         if n_speakers > 1:
             self.emb_g = nn.Embedding(n_speakers, gin_channels)
 
-    def forward(self, x, x_lengths, y, y_lengths, sid=None):
+        self.q_condition_layer = q_condition_layer
+        # TODO: remove hard coded token emb dim from here
+        self.q_labels = QuantizedWordFeaturesPredictor(
+            token_emb_dim=312, text_hidden_channels=hidden_channels, emb_dim=hidden_channels
+        )
+        self.q_teacher_forcing = q_teacher_forcing
+
+    def forward(
+        self, x, x_lengths, y, y_lengths, features: Sequence[Features] | None = None, sid=None
+    ):
         # x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths)
         if self.n_speakers > 0:
             g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
         else:
             g = None
 
-        x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, g=g)  # vits2?
+        x, q_cond, m_p, logs_p, x_mask = self.enc_p(
+            x, x_lengths, g=g, return_hidden=self.q_condition_layer
+        )  # vits2?
+        if self.q_condition_layer:
+            q_logits = self.q_labels(
+                # TODO: we currently don't propagate gradients from QWFP to TextEncoder (but maybe we should?)
+                q_cond.detach(),
+                features,
+            )
+            # we train this e2e, so using teacher forcing
+            # I suspect it may result in slower convergence for both models, but maybe it becomes more robust?
+            if np.random.uniform(0, 1) <= self.q_teacher_forcing:
+                # TODO: adopt that to batch input (collate tokspans, wrdspans and bert embeddings)
+                tokspans = features[0].tokspan.unsqueeze(1)
+                wrdspans = features[0].wrdspan.unsqueeze(0)
+                # fmt: off
+                alignment = (
+                    (tokspans[:, :, 0] >= wrdspans[:, :, 0]) &
+                    (tokspans[:, :, 1] <= wrdspans[:, :, 1])
+                )
+                # fmt: on
+                alignment = alignment.int()
+                nowords = alignment.eq(0).all(dim=1)
+                indices = torch.argmax(alignment, dim=1)
+                gts = features[0].qfeatures[indices]
+                pad = torch.zeros_like(gts)
+                q_target = torch.where(nowords.unsqueeze(1), pad, gts)
+                # labels should be of [B, token_len, n_features, 1] here
+                q_embeds = self.q_labels.from_labels(q_target[None, ..., None])
+            else:
+                q_embeds = self.q_labels.from_logits(q_logits)
+
+        # TODO: adapt embedding shapes so that we can add them directly to x_cond vectors
+        # looks like it would be easier to fuse QWFP with the TextEncoder itself,
+        # since we have to add it BEFORE the third layer
+        q_add = q_embeds.sum(dim=2).permute(0, 2, 1)
+
+        I = torch.arange((x.size(2) - 1) // 2)  # interspersed only !!!
+        alignment = (tokspans[:, :, 1] > I) & (I >= tokspans[:, :, 0])
+        alignment = alignment.int()
+        notokens = alignment.eq(0).all(dim=0)
+
+        pad = torch.zeros_like(x)
+        indices = alignment.argmax(dim=0)
+
+        pad[:, :, 1::2] = torch.where(notokens, pad[:, :, 1::2], q_add[:, :, indices])
+        # the 012[3, ...]
+        # the _0_1_2_
+        # the 0123456
+        # TODO: wrap it into aligning helper function, adopt for batches and test
+        # pad + x -> continue from the third layer in transformer (actually move it to a text_encoder)
+        # maybe we could just shift the spans correctly? the problem is that we don't wanna do anything for the interspersed embedding as of right now...
+
+        # TODO: also, we need to think about initialization scheme for embeddings
+        # since we sum them up, they should have some upper bound for summation, adjusted by the number of heads
         z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
         z_p = self.flow(z, y_mask, g=g)
 
@@ -1691,6 +1893,8 @@ class SynthesizerTrn(nn.Module):
     def infer(
         self, x, x_lengths, sid=None, noise_scale=1, length_scale=1, noise_scale_w=1.0, max_len=None
     ):
+        # TODO: we have to integrate the BERT model here?
+        # or should it expect the BERT embeddings (guess the latter)
         if self.n_speakers > 0:
             g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
         else:

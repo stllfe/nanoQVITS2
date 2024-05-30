@@ -33,6 +33,7 @@ _PUNCTUATION = ';:,.!?—…"«»“” '
 _LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
 
 SYMBOLS = [_PAD] + list(_PUNCTUATION) + list(_LETTERS)
+PAD_IDX = SYMBOLS.index(_PAD)
 
 SYMBOL_TO_INT = {s: i for i, s in enumerate(SYMBOLS)}
 INT_TO_SYMBOL = {i: s for i, s in enumerate(SYMBOLS)}

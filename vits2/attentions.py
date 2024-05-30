@@ -72,10 +72,15 @@ class Encoder(nn.Module):  # backward compatible vits2 encoder
             )
             self.norm_layers_2.append(LayerNorm(hidden_channels))
 
-    def forward(self, x, x_mask, g=None):
+    def forward(
+        self, x, x_mask, g=None, return_hidden: int | None = None
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]:
         attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
         x = x * x_mask
+        x_cond = None
         for i in range(self.n_layers):
+            # TODO: add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+            # https://github.com/huggingface/transformers/blob/v4.40.2/src/transformers/models/vits/modeling_vits.py#L1187
             if i == self.cond_layer_idx and g is not None:
                 g = self.spk_emb_linear(g.transpose(1, 2))
                 g = g.transpose(1, 2)
@@ -88,8 +93,11 @@ class Encoder(nn.Module):  # backward compatible vits2 encoder
             y = self.ffn_layers[i](x, x_mask)
             y = self.drop(y)
             x = self.norm_layers_2[i](x + y)
+            # TODO: remove hardcode here, make a configurable layer index for conditioning
+            if i == return_hidden:
+                x_cond = x * x_mask
         x = x * x_mask
-        return x
+        return x, x_cond
 
 
 class Decoder(nn.Module):

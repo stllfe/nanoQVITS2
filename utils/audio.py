@@ -26,7 +26,7 @@ def writewav(wav: NDArray, rate: int, path: str) -> None:
 
 
 def normalize(wav: NDArray) -> NDArray:
-    return wav / np.max(np.abs(wav)) * MAX_WAV_VALUE
+    return wav / np.max(np.abs(wav))
 
 
 def compute_pitch(audio: NDArray, rate: int, freq: float = 0.01) -> tuple[NDArray, NDArray]:
