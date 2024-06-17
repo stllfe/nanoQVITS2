@@ -1,0 +1,5 @@
+# overwrite defalut brackets set
+# this is required not to cleanup round brackets inside the text
+# otherwise, by default any word inside the brackets will get converted to `[bracketed]`
+# https://montreal-forced-aligner.readthedocs.io/en/latest/user_guide/configuration/global.html#dictionary-and-text-parsing-options
+brackets: [["<", ">"]]
