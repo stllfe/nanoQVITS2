@@ -43,10 +43,10 @@ class Utterance(NamedTuple):
 
 class Features(NamedTuple):
     symbols: AnyArray
-    tokembs: AnyArray
-    tokspan: AnyArray
-    wrdspan: AnyArray
-    qfeatures: AnyArray
+    qlabels: AnyArray
+    bert_embeds: AnyArray
+    bert_spans: AnyArray
+    word_spans: AnyArray
 
     @classmethod
     def load(cls, path: str | os.PathLike) -> Features:
@@ -72,23 +72,51 @@ class Features(NamedTuple):
     def torch(self, device: str | torch.device | None = None) -> Features:
         d = self._asdict()
         for k, v in d.items():
+            # torch doesn't support unsigned tensors unfortunately
             v = v.astype(np.int32) if v.dtype in (np.uint32, np.uint8) else v
             v = torch.from_numpy(v) if isinstance(v, np.ndarray) else v
             assert isinstance(v, torch.Tensor)
-            if torch.cuda.is_available() and str(device).startswith('cuda'):
-                v = v.pin_memory(device)
-            d[k] = v.to(device, non_blocking=True)
+            if device is not None:
+                if torch.cuda.is_available() and str(device).startswith('cuda'):
+                    v = v.pin_memory(device)
+                d[k] = v.to(device, non_blocking=True)
         return Features(**d)
 
 
+# TODO return to jaxtyping or something similar
+# variable axes:
+# num_words
+#   word_spans
+#   gt_labels
+# num_tokens
+#   token_spans
+#   bert_embeds
+# num_chars
+#   text
+# wave_length
+#   wave
+# spec_length
+#   spec
+
+
 class BatchPadded(NamedTuple):
-    feat: tuple[Features]
     text: LongTensor
     text_lengths: LongTensor
+
     spec: SpecForm
     spec_lengths: LongTensor
+
     wave: WaveForm
     wave_lengths: LongTensor
+
+    qlabels: LongTensor
+    word_lengths: LongTensor
+
+    bert_embeds: FloatTensor
+    bert_lengths: LongTensor
+
+    bert_spans: LongTensor
+    word_spans: LongTensor
 
 
 def load_filename_list(list_path: str | os.PathLike) -> list[str]:
@@ -229,14 +257,11 @@ class TTSDataset(torch.utils.data.Dataset):
 
 
 def collate_fn(batch: list[tuple[Features, SpecForm, WaveForm]]) -> BatchPadded:
-    """Collates dataset features in tensors of equal length and a batch dimension."""
+    """Collates dataset features in batched tensors of equal length."""
 
     feats, specs, waves = zip(*batch)
 
-    # shorthand for feats->symbols
-    # todo: maybe consider removing texts from the features then?
     texts = tuple(f.symbols for f in feats)
-
     text_padded = pad_sequence(texts, batch_first=True).long()
     text_lengths = torch.as_tensor([t.size(0) for t in texts], dtype=torch.long)
 
@@ -247,17 +272,37 @@ def collate_fn(batch: list[tuple[Features, SpecForm, WaveForm]]) -> BatchPadded:
     wave_padded = pad_sequence(waves, batch_first=True).unsqueeze_(1)
     wave_lengths = torch.as_tensor([w.size(0) for w in waves], dtype=torch.long)
 
+    # pad bert embeddings
+    bert_embeds = tuple(f.bert_embeds for f in feats)
+    bert_embeds_padded = pad_sequence(bert_embeds, batch_first=True)
+    bert_lengths = torch.as_tensor([e.size(1) for e in bert_embeds], dtype=torch.long)
+
+    # pad qlabels and extract word lengths
+    qlabels = tuple(f.qlabels for f in feats)
+    qlabels_padded = pad_sequence(qlabels, batch_first=True)
+    word_lengths = torch.as_tensor([q.size(1) for q in qlabels], dtype=torch.long)
+
+    # these lengths we already know
+    bert_spans = pad_sequence(tuple(f.bert_spans for f in feats), batch_first=True)
+    word_spans = pad_sequence(tuple(f.word_spans for f in feats), batch_first=True)
+
+    # order items by spec lengths in decreasing order
     indices = torch.argsort(spec_lengths, descending=True)
     reorder = op.itemgetter(indices)
 
     return BatchPadded(
-        feat=tuple(feats[i] for i in indices),
         text=reorder(text_padded),
         text_lengths=reorder(text_lengths),
         spec=reorder(spec_padded),
         spec_lengths=reorder(spec_lengths),
         wave=reorder(wave_padded),
         wave_lengths=reorder(wave_lengths),
+        qlabels=reorder(qlabels_padded),
+        word_lengths=reorder(word_lengths),
+        bert_embeds=reorder(bert_embeds_padded),
+        bert_lengths=reorder(bert_lengths),
+        bert_spans=reorder(bert_spans),
+        word_spans=reorder(word_spans),
     )
 
 

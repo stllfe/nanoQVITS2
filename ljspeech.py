@@ -159,17 +159,17 @@ def process() -> None:
     os.makedirs(FEAT_DIR, exist_ok=True)
     for ut, ws in tqdm(ut2ws.items(), total=len(ut2ws), desc='Writing files to disk'):
         ws.sort(key=lambda word: word.index)
-        tokembs, tokspan = bert.embed(ut.text, model, tokenizer)
         symbols = encode_text(ut.text)
         if TEXT_MIN_LENGTH > len(symbols) > TEXT_MAX_LENGTH:
             tqdm.write(f'Skip due to text length: {ut.filename}', sys.stderr)
             continue
+        bert_embeds, bert_spans = bert.embed(ut.text, model, tokenizer)
         feat = Features(
             symbols=np.asarray(symbols, dtype=np.uint8),
-            tokembs=tokembs,
-            tokspan=tokspan,
-            wrdspan=compute_word_spans(ut.text, ws),
-            qfeatures=np.asarray([w.feats for w in ws]).astype(np.uint8),
+            qlabels=np.asarray([w.feats for w in ws]).astype(np.uint8),
+            bert_embeds=bert_embeds,
+            bert_spans=bert_spans,
+            word_spans=compute_word_spans(ut.text, ws),
         )
         feat.save(Path(FEAT_DIR, ut.filename).with_suffix('.h5'))
 
@@ -188,12 +188,12 @@ def process_utterance(ut: Utterance) -> tuple[Utterance, list[Word]]:
 def split(num_test: int = 500, num_valid: int = 100, seed: int = 25512) -> None:
     """Compiles train, valid, test file lists for the processed dataset."""
 
-    def isready(ut: Utterance) -> bool:
+    def exists(ut: Utterance) -> bool:
         wp = Path(WAVS_DIR, ut.filename).with_suffix('.wav')
         fp = Path(FEAT_DIR, ut.filename).with_suffix('.h5')
         return wp.exists() and fp.exists()
 
-    uttrs = sorted(filter(isready, load_from_prepared()))
+    uttrs = sorted(filter(exists, load_from_prepared()))
     index = range(len(uttrs))
 
     random.seed(seed)

@@ -25,9 +25,12 @@ mfa align -j 8 \
 data/LJSpeech-1.1/wavs/ \
 english_mfa \
 english_mfa \
-data/LJSpeech-1.1/alignment
+data/LJSpeech-1.1/alignment \
+--config_path mfa.yaml
 ```
 
+
+### Monotonic Align Extension
 ```shell
 cd vits2/monotonic_align
 python setup.py build_ext --inplace

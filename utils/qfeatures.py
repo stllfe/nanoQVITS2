@@ -123,7 +123,7 @@ def compute_word_spans(text: str, words: Iterable[Word]) -> NDArray:
             word = next(words, None)
         else:
             i += 1
-    assert min(i, len(words)) == len(words), 'Not all words exist in the given text!'
+    assert len(list(words)) == 0, 'Not all words exist in the given text!'
     return np.array(spans, dtype=np.uint32)
 
 

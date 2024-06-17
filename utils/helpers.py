@@ -1,7 +1,30 @@
 from __future__ import annotations
 
+import contextlib
+
 from os import getenv
 from typing import ClassVar
+
+
+class Context(contextlib.ContextDecorator):
+    stack: ClassVar[list[dict[str, int]]] = [{}]
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
+    def __enter__(self) -> None:
+        Context.stack[-1] = {
+            k: o.value for k, o in ContextVar._cache.items()
+        }  # store current state.
+        for k, v in self.kwargs.items():
+            ContextVar._cache[k].value = v  # update to new temporary state.
+        Context.stack.append(
+            self.kwargs
+        )  # store the temporary state so we know what to undo later.
+
+    def __exit__(self, *args) -> None:
+        for k in Context.stack.pop():
+            ContextVar._cache[k].value = Context.stack[-1].get(k, ContextVar._cache[k].value)
 
 
 class ContextVar:

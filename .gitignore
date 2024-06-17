@@ -165,3 +165,4 @@ data/
 notebooks/
 reference/
 tmp/
+.aider*
