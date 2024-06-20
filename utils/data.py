@@ -6,8 +6,10 @@ import random
 import sys
 
 from collections.abc import Sequence
+from dataclasses import asdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple, TypeVar
+from typing import Generic, NamedTuple, TypeVar
 
 import h5py
 import numpy as np
@@ -23,6 +25,7 @@ from tqdm import tqdm
 
 from config import AudioConfig
 from config import TextConfig
+from utils import helpers
 from utils.audio import MAX_WAV_VALUE
 from utils.audio import readwav
 from utils.helpers import debug
@@ -31,55 +34,62 @@ from vits2.mel_processing import mel_spectrogram_torch
 from vits2.mel_processing import spectrogram_torch
 
 
-AnyArray = TypeVar('AnyArray', Tensor, NDArray)
 WaveForm = FloatTensor
 SpecForm = FloatTensor
 
 
 class Utterance(NamedTuple):
+    """A single speech data entity."""
+
     filename: str
     text: str
 
 
-class Features(NamedTuple):
-    symbols: AnyArray
-    qlabels: AnyArray
-    bert_embeds: AnyArray
-    bert_spans: AnyArray
-    word_spans: AnyArray
+T = TypeVar('T', Tensor, NDArray)
+
+
+@dataclass(slots=True)
+class Features(Generic[T]):
+    """The features extracted from an :class:`Utterance`."""
+
+    symbols: T
+    qlabels: T
+    bert_embeds: T
+    bert_spans: T
+    word_spans: T
 
     @classmethod
     def load(cls, path: str | os.PathLike) -> Features:
         d = {}
         with h5py.File(path, mode='r') as h5:
-            for k in cls._fields:
+            for k in cls.__slots__:
                 d[k] = np.asarray(h5[k])
         return Features(**d)
 
     def save(self, path: str | os.PathLike) -> None:
         x = self.numpy()
         with h5py.File(path, mode='w') as h5:
-            for k, v in x._asdict().items():
+            for k, v in asdict(x).items():
                 h5.create_dataset(k, data=v)
 
-    def numpy(self) -> Features:
-        d = self._asdict()
+    def numpy(self) -> Features[NDArray]:
+        d = asdict(self)
         for k, v in d.items():
-            d[k] = v.numpy() if isinstance(v, torch.Tensor) else v
+            d[k] = v if isinstance(v, np.ndarray) else v.detach().cpu().numpy()
             assert isinstance(d[k], np.ndarray)
         return Features(**d)
 
-    def torch(self, device: str | torch.device | None = None) -> Features:
-        d = self._asdict()
+    def torch(self, device: str | torch.device | None = None) -> Features[Tensor]:
+        d = asdict(self)
+        should_pin = torch.cuda.is_available() and str(device).startswith('cuda')
         for k, v in d.items():
             # torch doesn't support unsigned tensors unfortunately
             v = v.astype(np.int32) if v.dtype in (np.uint32, np.uint8) else v
             v = torch.from_numpy(v) if isinstance(v, np.ndarray) else v
             assert isinstance(v, torch.Tensor)
-            if device is not None:
-                if torch.cuda.is_available() and str(device).startswith('cuda'):
-                    v = v.pin_memory(device)
-                d[k] = v.to(device, non_blocking=True)
+            if device is not None and should_pin:
+                v = v.pin_memory(device)
+            d[k] = v.to(device, non_blocking=True)
         return Features(**d)
 
 
@@ -100,6 +110,8 @@ class Features(NamedTuple):
 
 
 class BatchPadded(NamedTuple):
+    """A batch of pad-collated samples."""
+
     text: LongTensor
     text_lengths: LongTensor
 
@@ -120,6 +132,8 @@ class BatchPadded(NamedTuple):
 
 
 def load_filename_list(list_path: str | os.PathLike) -> list[str]:
+    """Loads a list of filenames to select a subset of data."""
+
     filenames: list[str] = []
     with open(list_path, encoding='utf-8', mode='r') as file:
         for line in file:
@@ -161,7 +175,7 @@ class TTSDataset(torch.utils.data.Dataset):
         """Finds wavs and features paths with matching filennames."""
 
         self._samples.clear()
-        for filename in tqdm(self._filenames, desc='Looking for files'):
+        for filename in tqdm(self._filenames, desc='Looking for files', disable=helpers.DEBUG < 1):
             wp = Path(self._wavs_dir, filename).with_suffix('.wav')
             fp = Path(self._feat_dir, filename).with_suffix('.h5')
             if not wp.exists():
@@ -192,7 +206,7 @@ class TTSDataset(torch.utils.data.Dataset):
     def get_feats(self, featpath: str | os.PathLike) -> Features:
         feat = Features.load(featpath)
         if self._text_config and self._text_config.add_blank:
-            feat = feat._replace(symbols=commons.intersperse(feat.symbols, 0))
+            feat.symbols = commons.intersperse(feat.symbols, 0)
         return feat
 
     def get_audio(self, wavpath: str | os.PathLike) -> tuple[SpecForm, WaveForm]:
@@ -273,14 +287,15 @@ def collate_fn(batch: list[tuple[Features, SpecForm, WaveForm]]) -> BatchPadded:
     wave_lengths = torch.as_tensor([w.size(0) for w in waves], dtype=torch.long)
 
     # pad bert embeddings
-    bert_embeds = tuple(f.bert_embeds for f in feats)
+    # TODO: maybe save as flat already?
+    bert_embeds = tuple(f.bert_embeds.squeeze(0) for f in feats)
     bert_embeds_padded = pad_sequence(bert_embeds, batch_first=True)
-    bert_lengths = torch.as_tensor([e.size(1) for e in bert_embeds], dtype=torch.long)
+    bert_lengths = torch.as_tensor([e.size(0) for e in bert_embeds], dtype=torch.long)
 
     # pad qlabels and extract word lengths
     qlabels = tuple(f.qlabels for f in feats)
     qlabels_padded = pad_sequence(qlabels, batch_first=True)
-    word_lengths = torch.as_tensor([q.size(1) for q in qlabels], dtype=torch.long)
+    word_lengths = torch.as_tensor([q.size(0) for q in qlabels], dtype=torch.long)
 
     # these lengths we already know
     bert_spans = pad_sequence(tuple(f.bert_spans for f in feats), batch_first=True)
