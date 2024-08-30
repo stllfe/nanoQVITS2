@@ -79,9 +79,9 @@ class Features(Generic[T]):
             assert isinstance(d[k], np.ndarray)
         return Features(**d)
 
-    def torch(self, device: str | torch.device | None = None) -> Features[Tensor]:
+    def torch(self, device: str | torch.device | None = None, pin=False) -> Features[Tensor]:
         d = asdict(self)
-        should_pin = torch.cuda.is_available() and str(device).startswith('cuda')
+        should_pin = torch.cuda.is_available() and str(device).startswith('cuda') and pin
         for k, v in d.items():
             # torch doesn't support unsigned tensors unfortunately
             v = v.astype(np.int32) if v.dtype in (np.uint32, np.uint8) else v
@@ -263,8 +263,9 @@ class TTSDataset(torch.utils.data.Dataset):
         wp, fp = self._samples[index]
         spec, wave = self.get_audio(wp)
         feat = self.get_feats(fp)
+        feat = feat.torch()
         debug(f'{wp.stem} loaded', level=2, rank=0)
-        return feat.torch(), spec, wave
+        return feat, spec, wave
 
     def __len__(self) -> int:
         return len(self._samples)

@@ -80,6 +80,7 @@ class ModelConfig:
     n_layers_q: int = 3
     use_spectral_norm: bool = False
     use_sdp: bool = False
+    q_condition_layer: int = 2
 
 
 @dataclass

@@ -110,6 +110,7 @@ CONFIG = ExperimentConfig(
         n_layers_q=3,
         use_spectral_norm=False,
         use_sdp=False,
+        q_condition_layer=2,
     ),
     train=TrainConfig(
         log_interval=200,
@@ -452,6 +453,7 @@ def train_and_evaluate(
                 z_mask,
                 (z, z_p, m_p, logs_p, m_q, logs_q),
                 (hidden_x, logw, logw_),
+                q_loss,
             ) = net_g(x, x_lengths, spec, spec_lengths)
 
             if cfg.model.use_mel_posterior_encoder:
@@ -533,7 +535,9 @@ def train_and_evaluate(
                 else:
                     loss_subband = torch.tensor(0.0)
 
-                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_dur + loss_kl + loss_subband
+                loss_gen_all = (
+                    loss_gen + loss_fm + loss_mel + loss_dur + loss_kl + loss_subband + q_loss
+                )
                 if net_dur_disc is not None:
                     loss_dur_gen, losses_dur_gen = generator_loss(y_dur_hat_g)
                     loss_gen_all += loss_dur_gen
@@ -567,21 +571,18 @@ def train_and_evaluate(
             }
 
             if net_dur_disc is not None:  # 2인 경우
-                scalar_dict.update(
-                    {
-                        'loss/dur_disc/total': loss_dur_disc_all,
-                        'grad_norm_dur_disc': grad_norm_dur_disc,
-                    }
-                )
-            scalar_dict.update(
-                {
-                    'loss/g/fm': loss_fm,
-                    'loss/g/mel': loss_mel,
-                    'loss/g/dur': loss_dur,
-                    'loss/g/kl': loss_kl,
-                    'loss/g/subband': loss_subband,
-                }
-            )
+                scalar_dict.update({
+                    'loss/dur_disc/total': loss_dur_disc_all,
+                    'grad_norm_dur_disc': grad_norm_dur_disc,
+                })
+            scalar_dict.update({
+                'loss/g/fm': loss_fm,
+                'loss/g/mel': loss_mel,
+                'loss/g/dur': loss_dur,
+                'loss/g/kl': loss_kl,
+                'loss/g/subband': loss_subband,
+                'loss/g/q': q_loss,
+            })
 
             scalar_dict.update({'loss/g/{}'.format(i): v for i, v in enumerate(losses_gen)})
             scalar_dict.update({'loss/d_r/{}'.format(i): v for i, v in enumerate(losses_disc_r)})
