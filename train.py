@@ -3,6 +3,7 @@ import sys
 
 from dataclasses import asdict
 from logging import Logger
+from pprint import pformat
 from typing import Iterable
 
 import psutil
@@ -59,6 +60,7 @@ from vits2.pqmf import PQMF
 ModuleOrDDP = nn.Module | DDP
 
 torch.autograd.set_detect_anomaly(True)
+torch.set_float32_matmul_precision('high')
 torch.backends.cudnn.benchmark = True
 global_step = 0
 
@@ -169,7 +171,7 @@ def run(rank: int, n_gpus: int, cfg: ExperimentConfig) -> None:
 
     if ismaster(rank):
         logger = utils.get_logger(cfg.model_dir)
-        logger.info(cfg)
+        logger.info(pformat(cfg))
         utils.check_git_hash(cfg.model_dir)
         # TODO: add wandb option
         writer = SummaryWriter(log_dir=cfg.model_dir)
@@ -320,8 +322,11 @@ def run(rank: int, n_gpus: int, cfg: ExperimentConfig) -> None:
         noise_scale_delta=noise_scale_delta,
         **asdict(cfg.model),
     ).cuda(rank)
-
+    # net_g = torch.compile(net_g)
+    # logger.info('Generator model compiled!')
     net_d = MultiPeriodDiscriminator(cfg.model.use_spectral_norm).cuda(rank)
+    # net_d = torch.compile(net_d)
+    # logger.info('Discriminator model compiled!')
 
     optim_g = torch.optim.AdamW(
         net_g.parameters(), cfg.train.learning_rate, betas=cfg.train.betas, eps=cfg.train.eps
@@ -429,6 +434,8 @@ def train_and_evaluate(
                 net_g.module.mas_noise_scale_initial - net_g.module.noise_scale_delta * global_step
             )
             net_g.module.current_mas_noise_scale = max(current_mas_noise_scale, 0.0)
+        # TODO: add a helper function or method (better a combination) for moving BatchPadded tensors to appropriate device
+        # TODO: make model accept a single data structure without the need for passing everything as a separate argument
         x, x_lengths = (
             batch.text.cuda(rank, non_blocking=True),
             batch.text_lengths.cuda(rank, non_blocking=True),
@@ -454,7 +461,7 @@ def train_and_evaluate(
                 (z, z_p, m_p, logs_p, m_q, logs_q),
                 (hidden_x, logw, logw_),
                 q_loss,
-            ) = net_g(x, x_lengths, spec, spec_lengths)
+            ) = net_g(x, x_lengths, spec, spec_lengths, batch)
 
             if cfg.model.use_mel_posterior_encoder:
                 mel = spec
@@ -668,9 +675,12 @@ def evaluate(
             spec_lengths = spec_lengths[:1]
             y = y[:1]
             y_lengths = y_lengths[:1]
+
+            # TODO: not my proudest code... add a __getitem__ method for batch?
+            batch = batch._replace(**{k: v[:1].cuda(0) for k, v in batch.items()})
             break
 
-        y_hat, y_hat_mb, attn, mask, *_ = generator.module.infer(x, x_lengths, max_len=1000)
+        y_hat, y_hat_mb, attn, mask, *_ = generator.module.infer(x, x_lengths, batch, max_len=1000)
         y_hat_lengths = mask.sum([1, 2]).long() * cfg.data.audio.hop_length
 
         if cfg.model.use_mel_posterior_encoder:  # 2의 경우

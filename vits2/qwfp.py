@@ -46,6 +46,7 @@ class QuantizedWordFeaturesPredictor(torch.nn.Module):
         super().__init__()
         self.bert_emb_dim = bert_emb_dim
         self.n_features = n_feats
+        self.q_dim = q_dim
         self.text_emb_dim = text_emb_dim
         self.hidden_dim = text_emb_dim
         initial_channel = bert_emb_dim + self.hidden_dim
@@ -117,12 +118,12 @@ class QuantizedWordFeaturesPredictor(torch.nn.Module):
             # as per authors we may select the last char hidden (of each token) from the text encoder outputs directly
             # but the problem with not taking intersperse neighbors into account still kinda applies then...
 
-            L = bert_lengths[i]
+            L = bert_lengths[i].item()
             char_emb = torch.index_select(
                 # FIXME: works only for interspersed version
                 x[i][1::2],
                 dim=0,
-                index=bert_spans[i, :L, 1] - 1,
+                index=torch.clamp(bert_spans[i, :L, 1] - 1, max=x[i][1::2].size(0) - 1),
             )
             # adjust to bert length
             char_embeds[i, :L] = char_emb
@@ -134,7 +135,12 @@ class QuantizedWordFeaturesPredictor(torch.nn.Module):
         x = x.transpose(1, 2)
 
         # TODO: do we need it anyways?
-        packed_x = pack_padded_sequence(x, bert_lengths, batch_first=True, enforce_sorted=True)
+        packed_x = pack_padded_sequence(
+            x,
+            bert_lengths.cpu(),
+            batch_first=True,
+            enforce_sorted=False,
+        )
         packed_latents, _ = self.token_rnn(packed_x)  # [B, token_len, inner_hidden_dim * 2]
         latents, _ = pad_packed_sequence(packed_latents)
         latents = latents.permute(1, 0, 2)
@@ -227,11 +233,25 @@ class QWFPEncoder(Encoder):
             features.bert_lengths,
             features.bert_spans,
         )
-        # [B, token_len, q_dim, n_features] -> [B, token_len, n_features]
+        q_mask = commons.sequence_mask(
+            features.bert_lengths, max_length=features.bert_spans.shape[1]
+        )
         q_target, _ = self.get_token_level_q_targets(features)
+        q_target.masked_fill_(q_mask.unsqueeze(-1), 0)
+        if q_logits.size(1) < q_target.size(1):
+            assert q_logits.size(0) == 1, 'Should be a single element then'
+            q_logits = F.pad(
+                q_logits,
+                (0, 0, 0, 0, 0, q_target.size(1) - q_logits.size(1)),
+                value=0,
+                mode='constant',
+            )
+
+        # TODO: this is very different from how losses are calculated elsewhere
+        # maybe remove it from here and rather return the logits directly?
         q_loss = F.cross_entropy(
-            q_logits.view(-1, self.qwfp.n_features),
-            q_target.view(-1, self.qwfp.n_features),
+            q_logits.view(-1, self.qwfp.n_features, self.qwfp.q_dim),
+            q_target.view(-1, self.qwfp.n_features).long(),  # FIXME: prepare at batch-time?
             ignore_index=0,
         )
         # q_labels = q_labels.unsqueeze(-1)
@@ -242,6 +262,7 @@ class QWFPEncoder(Encoder):
         if np.random.uniform(0, 1) <= self.q_teacher_forcing:
             q_labels = q_target
         else:
+            # [B, token_len, q_dim, n_features] -> [B, token_len, n_features]
             q_labels = q_logits.argmax(dim=2)
 
         # labels should be of [B, token_len, n_features, 1] here
@@ -254,7 +275,7 @@ class QWFPEncoder(Encoder):
         q_add = q_embeds.sum(dim=2).permute(0, 2, 1)
 
         # upsample q embeddings back to char level and add to x_cond
-        interspersed_indices = torch.arange((x.size(2) - 1) // 2)
+        interspersed_indices = torch.arange((x.size(2) - 1) // 2, device=x.device)
         bert_spans = features.bert_spans.unsqueeze(2)
         # fmt: off
         alignment = (
@@ -263,20 +284,21 @@ class QWFPEncoder(Encoder):
         )
         # fmt: on
         alignment = alignment.int()
-        notokens = alignment.eq(0).all(dim=1)
+        tokens_mask = ~alignment.eq(0).all(dim=1)
 
         xq = torch.zeros_like(x)
         indices = alignment.argmax(dim=1)
 
         # FIXME: again, works on interspersed only
         xq[:, :, 1::2] = torch.where(
-            notokens.unsqueeze(1),
-            xq[:, :, 1::2],
+            tokens_mask.unsqueeze(1),
             q_add.take_along_dim(indices.unsqueeze(1), dim=2),
+            xq[:, :, 1::2],
         )
         return xq, q_loss
 
     def get_token_level_q_targets(self, features: BatchPadded) -> tuple[Tensor, Tensor]:
+        # FIXME: padding for spans messes with the alignment
         bert_spans = features.bert_spans.unsqueeze(2)
         word_spans = features.word_spans.unsqueeze(1)
         # fmt: off

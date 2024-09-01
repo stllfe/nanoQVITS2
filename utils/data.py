@@ -5,6 +5,7 @@ import os
 import random
 import sys
 
+from collections.abc import Iterable
 from collections.abc import Sequence
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -109,6 +110,7 @@ class Features(Generic[T]):
 #   spec
 
 
+# @dataclass(slots=True, eq=False)  # TODO: investigate why using dataclasses messes up tensor devices
 class BatchPadded(NamedTuple):
     """A batch of pad-collated samples."""
 
@@ -129,6 +131,9 @@ class BatchPadded(NamedTuple):
 
     bert_spans: LongTensor
     word_spans: LongTensor
+
+    def items(self) -> Iterable[tuple[str, Tensor]]:
+        return self._asdict().items()
 
 
 def load_filename_list(list_path: str | os.PathLike) -> list[str]:

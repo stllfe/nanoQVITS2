@@ -5,6 +5,7 @@ from os import PathLike
 from typing import Literal
 
 
+RUN_NAME = os.getenv('RUN_NAME', 'mini-mb-istft-vits2_LJSpeech')
 PROJ_DIR = os.path.abspath(os.path.dirname(__file__))
 LOGS_DIR = os.path.join(PROJ_DIR, 'logs')
 
@@ -114,7 +115,6 @@ class ExperimentConfig:
 
     def __post_init__(self) -> None:
         # TODO: need a beter solution
-        # a template, or get from CLI or environment?
+        # get from CLI or environment?
         # default to some timecoded string?
-        model_name = 'mini-mb-istft-vits2_LJSpeech'
-        self.model_dir = os.path.join(LOGS_DIR, model_name)
+        self.model_dir = os.path.join(LOGS_DIR, RUN_NAME)
