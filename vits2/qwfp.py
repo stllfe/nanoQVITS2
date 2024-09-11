@@ -233,34 +233,12 @@ class QWFPEncoder(Encoder):
             features.bert_lengths,
             features.bert_spans,
         )
-        q_mask = commons.sequence_mask(
-            features.bert_lengths, max_length=features.bert_spans.shape[1]
-        )
-        q_target, _ = self.get_token_level_q_targets(features)
-        q_target.masked_fill_(q_mask.unsqueeze(-1), 0)
-        if q_logits.size(1) < q_target.size(1):
-            assert q_logits.size(0) == 1, 'Should be a single element then'
-            q_logits = F.pad(
-                q_logits,
-                (0, 0, 0, 0, 0, q_target.size(1) - q_logits.size(1)),
-                value=0,
-                mode='constant',
-            )
-
-        # TODO: this is very different from how losses are calculated elsewhere
-        # maybe remove it from here and rather return the logits directly?
-        q_loss = F.cross_entropy(
-            q_logits.view(-1, self.qwfp.n_features, self.qwfp.q_dim),
-            q_target.view(-1, self.qwfp.n_features).long(),  # FIXME: prepare at batch-time?
-            ignore_index=0,
-        )
-        # q_labels = q_labels.unsqueeze(-1)
 
         # we train this e2e, so using teacher forcing
         # I suspect it may result in slower convergence for both models, but maybe it becomes more robust?
         # under q_teacher_forcing = 1 it's exactly the original way of training
         if np.random.uniform(0, 1) <= self.q_teacher_forcing:
-            q_labels = q_target
+            q_labels, _ = get_token_level_q_targets(features)
         else:
             # [B, token_len, q_dim, n_features] -> [B, token_len, n_features]
             q_labels = q_logits.argmax(dim=2)
@@ -295,25 +273,7 @@ class QWFPEncoder(Encoder):
             q_add.take_along_dim(indices.unsqueeze(1), dim=2),
             xq[:, :, 1::2],
         )
-        return xq, q_loss
-
-    def get_token_level_q_targets(self, features: BatchPadded) -> tuple[Tensor, Tensor]:
-        # FIXME: padding for spans messes with the alignment
-        bert_spans = features.bert_spans.unsqueeze(2)
-        word_spans = features.word_spans.unsqueeze(1)
-        # fmt: off
-        alignment = (
-            (bert_spans[:, :, :, 0] >= word_spans[:, :, :, 0]) &
-            (bert_spans[:, :, :, 1] <= word_spans[:, :, :, 1])
-        )
-        # fmt: on
-        alignment = alignment.int()
-        words_mask = ~alignment.eq(0).all(dim=2)
-        indices = torch.argmax(alignment, dim=2)
-        gts = features.qlabels.take_along_dim(indices.unsqueeze(2), dim=1)
-        q = torch.zeros_like(gts)
-        q_target = torch.where(words_mask.unsqueeze(2), gts, q)
-        return q_target, words_mask
+        return xq, q_logits
 
     def forward(
         self, x, x_mask, g=None, features: BatchPadded | None = None
@@ -330,7 +290,7 @@ class QWFPEncoder(Encoder):
                     x = x + g
                     x = x * x_mask
                 if features is not None:
-                    q, q_loss = self.compute_q(x, x_mask, features)
+                    q, q_logits = self.compute_q(x, x_mask, features)
                     x = x + q
                     x = x * x_mask
                 else:
@@ -344,14 +304,47 @@ class QWFPEncoder(Encoder):
             y = self.drop(y)
             x = self.norm_layers_2[i](x + y)
         x = x * x_mask
-        return x, q_loss
+        return x, q_logits
 
 
-def align_word_token() -> ...:
-    # TODO
-    pass
+def get_token_level_q_targets(features: BatchPadded) -> tuple[Tensor, Tensor]:
+    # FIXME: padding for spans messes with the alignment
+    bert_spans = features.bert_spans.unsqueeze(2)
+    word_spans = features.word_spans.unsqueeze(1)
+    # fmt: off
+    alignment = (
+        (bert_spans[:, :, :, 0] >= word_spans[:, :, :, 0]) &
+        (bert_spans[:, :, :, 1] <= word_spans[:, :, :, 1])
+    )
+    # fmt: on
+    alignment = alignment.int()
+    words_mask = ~alignment.eq(0).all(dim=2)
+    indices = torch.argmax(alignment, dim=2)
+    gts = features.qlabels.take_along_dim(indices.unsqueeze(2), dim=1)
+    q = torch.zeros_like(gts)
+    q_target = torch.where(words_mask.unsqueeze(2), gts, q)
+    return q_target, words_mask
 
 
-def align_token_word() -> ...:
-    # TODO
-    pass
+def compute_q_loss(
+    logits: Tensor,
+    features: BatchPadded,
+    n_features: int = 6,
+    q_dim: int = 6,  # TODO: remove hard-coded dimensions
+) -> Tensor:
+    target, _ = get_token_level_q_targets(features)
+    mask = commons.sequence_mask(features.bert_lengths, max_length=features.bert_spans.size(1))
+    target.masked_fill_(mask.unsqueeze(-1), 0)
+    if logits.size(1) < target.size(1):
+        assert logits.size(0) == 1, 'Should be a single batch element then!'
+        logits = F.pad(
+            logits,
+            (0, 0, 0, 0, 0, target.size(1) - logits.size(1)),
+            value=0,
+            mode='constant',
+        )
+    return F.cross_entropy(
+        logits.view(-1, n_features, q_dim),
+        target.view(-1, n_features).long(),  # FIXME: prepare at batch-time?
+        ignore_index=0,
+    )

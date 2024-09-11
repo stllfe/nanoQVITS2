@@ -29,15 +29,18 @@ def load() -> tuple[PreTrainedModel, PreTrainedTokenizer]:
 @torch.inference_mode()
 def embed(
     text: str,
-    model: PreTrainedModel,
-    tokenizer: PreTrainedTokenizer,
+    model: PreTrainedModel | None = None,
+    tokenizer: PreTrainedTokenizer | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Extracts token embeddings with the given model.
 
     Returns:
         A tuple of embeddings and token spans (T x 2 [start, end]) in the given texts:
     """
-
+    if not model:
+        model, tokenizer = load()
+    elif model and not tokenizer:
+        raise ValueError(f'No tokenizer provided with the {model=}')
     data = tokenizer(
         text,
         add_special_tokens=False,

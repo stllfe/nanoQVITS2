@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 import vits2.commons as commons
+from vits2.qwfp import compute_q_loss
 import vits2.utils as utils
 
 from config import AudioConfig
@@ -460,8 +461,10 @@ def train_and_evaluate(
                 z_mask,
                 (z, z_p, m_p, logs_p, m_q, logs_q),
                 (hidden_x, logw, logw_),
-                q_loss,
+                q_logits,
             ) = net_g(x, x_lengths, spec, spec_lengths, batch)
+
+            q_loss = compute_q_loss(q_logits, batch)
 
             if cfg.model.use_mel_posterior_encoder:
                 mel = spec
