@@ -1631,7 +1631,7 @@ class SynthesizerTrn(nn.Module):
         else:
             g = None
 
-        x, m_p, logs_p, x_mask, q_loss = self.enc_p(x, x_lengths, g=g, features=features)
+        x, m_p, logs_p, x_mask, q_logits = self.enc_p(x, x_lengths, g=g, features=features)
         z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
         z_p = self.flow(z, y_mask, g=g)
 
@@ -1688,7 +1688,7 @@ class SynthesizerTrn(nn.Module):
             y_mask,
             (z, z_p, m_p, logs_p, m_q, logs_q),
             (x, logw, logw_),
-            q_loss,
+            q_logits,
         )
 
     def infer(

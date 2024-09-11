@@ -86,25 +86,24 @@ words = []
 for match in words_regex.finditer(text):
     words.append((match.group(0), match.span(0)))
 
-# TODO: finish this
+words, word_spans = zip(*words)
+
 features = BatchPadded(
-    text=text_encoded,
+    text=text_encoded.unsqueeze(0),
     text_lengths=text_lengths,
     bert_embeds=torch.from_numpy(bert_embeds),
-    bert_spans=torch.from_numpy(bert_spans),
-    bert_lengths=None,
+    bert_spans=torch.from_numpy(bert_spans.astype(int)).unsqueeze(0),
+    bert_lengths=torch.tensor([len(bert_spans)], dtype=torch.long),
     spec=None,
     spec_lengths=None,
     wave=None,
     wave_lengths=None,
     qlabels=None,
-    word_lengths=None,
-    word_spans=None,
+    word_lengths=torch.tensor([len(words)], dtype=torch.long),
+    word_spans=torch.tensor(list(word_spans), dtype=torch.long).unsqueeze(0),
 )
-# TODO: make sure this produces logits
-_, q_logits = net_g.enc_p.encoder.forward(
-    text_encoded, torch.ones_like(text_encoded), features=features
-)
+net_g.enc_p.encoder.q_teacher_forcing = 0.0  # FIXME
+*_, q_logits = net_g.enc_p.forward(features.text, features.text_lengths, features=features)
 # TODO: make new targets for generator from predictions + self-made mask
 
 # TODO: generate from there
